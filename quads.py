@@ -70,11 +70,11 @@ class M_Pi_2:
         self.terminal_costs_d = gpuarray.zeros(K, dtype = np.float32)
         self.forest = self.on_gpu(forest)
         #Initialize CUDA functions
-        rollout_kernel, U_d = self.func1(T)
+        rollout_kernel, U_d, p_d = self.func1(T)
         cost_to_go = self.func2(T)
         reduction = self.func3()
         multiply = self.func4()
-        self.funcs = rollout_kernel, cost_to_go, reduction, multiply, U_d
+        self.funcs = rollout_kernel, cost_to_go, reduction, multiply, U_d, p_d
 
     def rollouts(self, U, var1, var2, point, mode, test = False):
         #Get an array of random numbers from CUDA. The numbers are
@@ -82,8 +82,9 @@ class M_Pi_2:
         du = self.generator.gen_normal(self.K*self.T*(control_dimensions), np.float32)
         #Unpack CUDA functions from self.funcs, get addresses of array in constant 
         #memory
-        rollout_kernel, cost_to_go, reduction, multiply, U_d = self.funcs
+        rollout_kernel, cost_to_go, reduction, multiply, U_d, p_d = self.funcs
         cuda.memcpy_dtod(U_d, U.ptr, U.nbytes)
+        cuda.memcpy_dtod(p_d, point.ptr, point.nbytes)
         #Set blocksize and gridsize for rollout and cost-to-go kernels
         blocksize = (64, 1, 1)
         gridsize = ((self.K - 1)//64 + 1, 1, 1)
@@ -95,8 +96,7 @@ class M_Pi_2:
                        du, self.init_state_d, self.forest, np.float32(self.dt), 
                        np.float32(motor_gain),
                        np.float32(total_mass), np.float32(I_x), np.float32(I_y),
-                       np.float32(I_z), np.float32(l), np.float32(var1), np.float32(var2),
-                       point, mode,
+                       np.float32(I_z), np.float32(l), np.float32(var1), np.float32(var2), mode,
                        grid=gridsize, block=blocksize)
         cuda.Context.synchronize()
         d = self.terminal_costs_d.get()
@@ -142,6 +142,7 @@ class M_Pi_2:
             cuda.Context.synchronize()
         normalizer = out_d
         cuda.Context.synchronize()
+        print point
         #Multipy the controls by the weighted score. The weighted score is the cost-to-go
         #function divided by the normalizer.
         start = datetime.now()
@@ -192,7 +193,7 @@ class M_Pi_2:
         Y = []
         Z = []
         #Prepares the quadrotor for takeoff, p is the point it's aiming at.
-        p = np.array([0,0,1.5])
+        p = np.array([0,0,1.5],dtype=np.float32)
         p_d = self.on_gpu(p)
         #While loop for computing PI^2
         var = 250
@@ -201,19 +202,15 @@ class M_Pi_2:
         stop = False
         while (count < count_max and not stop):
             U,d,c = self.rollouts(U, 250, 0, p_d, 1)
-            if count == 0:
-                d_orig = d
-            cost = d
-            d = (d/d_orig)
-            if (cost < 20):
+            if (d < 20):
                 stop = True
             count += 1
-            var = var*d
-            print cost
         #Takeoff! Uses the pre-computed commands from the while loop
         info = self.plotter(U.get().reshape(T,4), init_state, T, plot=False)
         #Prints the state of the quadrotors after the takeoff commands have executed.
         print "After takeoff algorithm"
+        p = np.array([0,0,2],dtype=np.float32)
+        p_d = self.on_gpu(p)
         print info[0]
         #Records the new state into the class field
         self.init_state = info[0]
@@ -226,7 +223,8 @@ class M_Pi_2:
         U = np.zeros(T*4, dtype = np.float32)
         U = self.on_gpu(U)
         var = 500
-        while(True):
+        #Cancel Loop for now!!!!
+        while((abs(self.init_state[8]) > .05 or abs(2 - self.init_state[2]) > .05) and False):
             U,d,c = self.rollouts(U, var, 0, p_d, 2)
             U_old = U.get()
             info = self.plotter(U_old.reshape(T,4), self.init_state, 1, plot=False)
@@ -241,7 +239,53 @@ class M_Pi_2:
             U_new = np.zeros(T*4, dtype = np.float32)
             U_new[:(T-1)*4] = U_old[4:]
             U = self.on_gpu(U_new)
-        print U
+        self.init_state = np.array([0,0,2,0,0,0,0,0,0,0,0,0,3167.9,3167.9,3167.9,3167.9], dtype=np.float32)
+        self.init_state_d = self.on_gpu(self.init_state)
+        #Now move to the point (2,2,2)
+        print "====================================="
+        count = 0
+        d = 21
+        """
+        while(count < 500):
+            U,d,c = self.rollouts(U, 500, 1.5, p_d, 1)
+            print p_d, self.init_state_d
+            print
+            print count
+            print d,c
+            print U
+            print 
+            if (np.mean(p_d.get()) == 0):
+                break
+            count += 1
+        print "======================================"
+        self.plotter(U.get().reshape(T,4), self.init_state,T,plot=True)
+        """
+        p = np.array([2,2,2], dtype=np.float32)
+        p_d_test = self.on_gpu(p)
+        count = 0
+        while(True):
+            count += 1
+            print count
+            print "++++++++++++++++++++++++++++++++++++++++"
+            print p_d_test
+            U,d,c = self.rollouts(U, 500, 1.5, p_d_test, 1)
+            print p_d_test
+            print "========================================"
+            print p_d_test
+            print "ttttttttttttttttttttttttttttttttttttttttttt"
+            U_old = U.get()
+            info = self.plotter(U_old.reshape(T,4), self.init_state,1,plot=False)
+            print p_d_test
+            print "-----------------------------------------"
+            self.init_state = info[0]
+            self.init_state_d = self.on_gpu(info[0])
+            print info[0], info[1], info[2]
+            X.extend(info[1])
+            Y.extend(info[2])
+            Z.extend(info[3])
+            U_new = np.zeros(T*4, dtype = np.float32)
+            U_new[:(T-1)*4] = U_old[4:]
+            U = self.on_gpu(U_new)
         """
         X = np.array(X)
         Y = np.array(Y)
@@ -327,6 +371,7 @@ class M_Pi_2:
             s[13] += motor_gain*dt*(w[1] - s[13])
             s[14] += motor_gain*dt*(w[2] - s[14])
             s[15] += motor_gain*dt*(w[3] - s[15])
+
         if (plot == True):
             X = np.array(X)
             Y = np.array(Y)
@@ -373,27 +418,46 @@ class M_Pi_2:
     #define K %d
     
     __device__ __constant__ float U_d[T*CONTROL_DIM];
+    __device__ __constant__ float p[16];
     
     __device__ int get_distance(float* state) 
     {
        return 0;
     }
 
-    __device__ float get_state_cost(float* s, float* u, float* p, float* trees, int mode)
+    __device__ float get_state_cost(float* s, float* u, float* trees, int mode)
     { 
        float cost = 0;
+       float ground_penalty = 0;
+       float tilt_penalty = 0;
        if (mode == 1) {
+          return 0;
           cost =  .1*( (s[0]-p[0])*(s[0]-p[0]) + (s[1]-p[1])*(s[1]-p[1]) + (s[2] - p[2])*(s[2] - p[2]) );
        }
        if (mode == 2) {
-          cost = 1*(u[0]/1000.0)*(u[0]/1000.0) + 1*(s[8]*s[8]) + 1*(1.5 - s[2])*(1.5 - s[2]);
+          cost = 1*( (u[0]/1000.0)*(u[0]/1000.0) + (u[1]*u[1]) + (u[2]*u[2])+(u[3]*u[3]) )
+                 + 1*( (s[3]*s[3]) + (s[4]*s[4]) + (s[5]*s[5]) ) 
+                 + 5*( (s[0]-p[0])*(s[0]-p[0]) + (s[1]-p[1])*(s[1]-p[1]) + (s[2]-p[2])*(s[2]-p[2]) )
+                 + 1*( (s[6]*s[6]) + (s[7]*s[7]) + (s[8]*s[8]) )
+                 + 1*( (s[9]*s[9]) + (s[10]*s[10]) + (s[11]*s[11]) );
        }
+       if (s[2]*s[2] < .1 && s[8] < 0) {
+          ground_penalty = 100;
+       }
+       cost += ground_penalty;
+       if (fabs(s[3]) > 1.4 || fabs(s[4]) > 1.4) {
+          tilt_penalty = 0;
+       }
+       cost += tilt_penalty;
        return cost;
     }
 
-    __device__ float get_terminal_cost(float* s, float* p, int mode)
+    __device__ float get_terminal_cost(float* s, int mode)
     {
        float cost = 0;
+       if (threadIdx.x == 0 && blockIdx.x == 0 && mode == 1) {
+          printf("%%f,  %%f,  %%f ||", p[0],p[1],p[2]);
+       }
        if (mode == 1) {
           cost = 50*( (s[0]-p[0])*(s[0]-p[0]) + (s[1] - p[1])*(s[1] - p[1]) + (s[2]-p[2])*(s[2]-p[2]) );
        }
@@ -413,7 +477,7 @@ class M_Pi_2:
     __global__ void rollout_kernel(float* controls_d, float* state_costs_d, float* terminal_costs_d,
                                    float* du, float* init_state, float* trees, float dt, float motor_gain, 
                                    float mass, float Ix, float Iy, float Iz, float l, 
-                                   float var1, float var2, float* point, int* mode1)
+                                   float var1, float var2, int* mode1)
     {
        int mode = mode1[0];
        //Get thread and block index
@@ -426,10 +490,6 @@ class M_Pi_2:
        float min_thrust = -2167.77;
        float max_tilt = 4000;
        float min_tilt = -4000;
-       __shared__ float p[3];
-       p[0] = point[0];
-       p[1] = point[1];
-       p[2] = point[2];
        //Initialize local state
        float s[STATE_DIM];
        float u[CONTROL_DIM];
@@ -535,8 +595,8 @@ class M_Pi_2:
              s[14] += dt*motor_gain*(w[2] - s[14]);
              s[15] += dt*motor_gain*(w[3] - s[15]);
              //Get State Costs
-             float cost = get_state_cost(s, u, p, trees, mode);
-             //Add costs into state_costs
+             float cost = get_state_cost(s, u, trees, mode);
+             //Add costs into state_costs 
              state_costs_d[(64*bdx + tdx)*T + i] = cost;
              //Add controls
              for (j = 0; j < CONTROL_DIM; j++) {
@@ -544,15 +604,18 @@ class M_Pi_2:
              }
           }
           //Get Terminal Costs
-          float terminal_cost = get_terminal_cost(s, p, mode);
-          terminal_costs_d[64*bdx + tdx] = terminal_cost;
+          if (64*bdx + tdx < K) {
+              float terminal_cost = get_terminal_cost(s, mode);
+              terminal_costs_d[64*bdx + tdx] = terminal_cost;
+          }
        }
     }
     """%(T, ceiling_height, world_radius, control_dimensions, state_dimensions, self.K)
         mod = SourceModule(template)
         func = mod.get_function("rollout_kernel")
         U_d = mod.get_global("U_d")[0]
-        return func, U_d
+        p_d = mod.get_global("p")[0]
+        return func, U_d, p_d
 
     
     def func2(self, T):
@@ -618,7 +681,7 @@ class M_Pi_2:
         __syncthreads();
       }
 
-      if (tdy == 0 && x_ind < x_len) {
+      if (tdy == 0 && x_ind < x_len && y_ind < y_len) {
         out_d[bdy*x_len + x_ind] = data[tdx];
       } 
     }
