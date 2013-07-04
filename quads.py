@@ -25,8 +25,7 @@ Define some parameters regarding the world
 """
 control_dimensions = 4
 state_dimensions = 16
-ceiling_height = 100
-world_radius = 10
+gravity = 9.81
 """
 Define some parameters for the virtual quad-rotor
 """
@@ -35,13 +34,18 @@ m = .02
 total_mass = .25
 l = .1
 R = .05
-I_x = .4*(M*R**2 + l**2*m)
-I_y = I_x
-I_z = .4*M*R**2 + 4*l**2*m
-I = np.array([[I_x,0,0],[0,I_y,0],[0,0,I_z]])
+Ix = .4*(M*R**2 + l**2*m)
+Iy = Ix
+Iz = .4*M*R**2 + 4*l**2*m
 K_m = 1.5e-9
 K_f = 6.11e-8
 motor_gain = 1.0
+max_rotor_speed = 9000.0
+min_rotor_speed = 1000.0
+max_thrust = 5832.23
+min_thrust = -2167.77
+max_tilt = 4000.0
+min_tilt = 4000.0
 """
 Define some paramaters for CUDA compilation
 """
@@ -78,7 +82,7 @@ class M_Pi_2:
         self.forest = forest
         self.forest_d = self.on_gpu(forest)
         #Compile and store CUDA functions
-        rollout_kernel, U_d = self.func1(T)
+        rollout_kernel, U_d = self.func1()
         cost_to_go = self.func2(T)
         reduction = self.func3()
         multiply = self.func4()
@@ -97,10 +101,8 @@ class M_Pi_2:
         gridsize = ((self.K - 1)//block_dim + 1, 1, 1)
         #Launch the kernel for simulating rollouts
         rollout_kernel(self.controls_d, self.state_costs_d, self.terminal_costs_d,
-                       du, self.state_d, self.forest_d, goal_state_d, np.float32(self.dt), 
-                       np.float32(motor_gain),
-                       np.float32(total_mass), np.float32(I_x), np.float32(I_y),
-                       np.float32(I_z), np.float32(l), np.float32(var1), np.float32(var2),
+                       du, self.state_d, self.forest_d, goal_state_d, 
+                       np.float32(motor_gain), np.float32(var1), np.float32(var2),
                        grid=gridsize, block=blocksize)
         cuda.Context.synchronize()
         d = self.terminal_costs_d.get()
@@ -384,13 +386,13 @@ class M_Pi_2:
             s[6] += dt*F_sum*(np.cos(s[5])*np.sin(s[4]) + np.cos(s[4])*np.sin(s[5])*np.sin(s[3]))
             s[7] += dt*F_sum*(np.sin(s[5])*np.sin(s[4]) - np.cos(s[5])*np.cos(s[4])*np.sin(s[3]))
             s[8] += dt*(F_sum*(np.cos(s[3])*np.cos(s[4])) - 9.81)
-            s[9] += dt/I_x * (l*(F_2 - F_4) - s[10]*s[11]*(I_z - I_y))
-            s[10] += dt/I_y * (l*(F_3 - F_1) - s[9]*s[11]*(I_x - I_z))
+            s[9] += dt/Ix * (l*(F_2 - F_4) - s[10]*s[11]*(Iz - Iy))
+            s[10] += dt/Iy * (l*(F_3 - F_1) - s[9]*s[11]*(Ix - Iz))
             M_1 = K_m*s[12]**2
             M_2 = K_m*s[13]**2
             M_3 = K_m*s[14]**2
             M_4 = K_m*s[15]**2
-            s[11] += dt/I_z * (M_1 - M_2 + M_3 - M_4 - s[9]*s[10]*(I_y - I_x))
+            s[11] += dt/Iz * (M_1 - M_2 + M_3 - M_4 - s[9]*s[10]*(Iy - Ix))
             s[12] += motor_gain*dt*(w[0] - s[12])
             s[13] += motor_gain*dt*(w[1] - s[13])
             s[14] += motor_gain*dt*(w[2] - s[14])
@@ -428,18 +430,29 @@ class M_Pi_2:
     func4 = Function for multiplying states by their weights
     """
     
-    def func1(self, T):
+    def func1(self):
         template = """
    
     #include <math.h>
     #include <stdio.h>
     
     #define T %d
-    #define CEILING_HEIGHT %d
-    #define WORLD_R %d
-    #define CONTROL_DIM %d
-    #define STATE_DIM %d
     #define K %d
+    #define dt %f
+    #define STATE_DIM %d
+    #define CONTROL_DIM %d
+    #define Ix %f
+    #define Iy %f
+    #define Iz %f
+    #define mass %f
+    #define l %f
+    #define gravity %f
+    #define max_speed %f
+    #define min_speed %f
+    #define max_thrust %f
+    #define min_thrust %f
+    #define max_tilt %f
+    #define min_tilt %f
     
     __device__ __constant__ float U_d[T*CONTROL_DIM];
     
@@ -469,7 +482,7 @@ class M_Pi_2:
               + 5*( (s[0]-p[0])*(s[0]-p[0]) + (s[1]-p[1])*(s[1]-p[1]) + (s[2]-p[2])*(s[2]-p[2]) )
               + 1*( (s[6]*s[6]) + (s[7]*s[7]) + (s[8]*s[8]) )
               + 1*( (s[9]*s[9]) + (s[10]*s[10]) + (s[11]*s[11]) );
-       if (s[2]*s[2] < .1 && s[8] < 0) {
+/       if (s[2]*s[2] < .1 && s[8] < 0) {
           ground_penalty = 100;
        }
        cost += ground_penalty;
@@ -498,21 +511,12 @@ class M_Pi_2:
    
     __global__ void rollout_kernel(float* controls_d, float* state_costs_d, float* terminal_costs_d,
                                    float* du, float* init_state, float* trees, float* goal_state, 
-                                   float dt, float motor_gain, 
-                                   float mass, float Ix, float Iy, float Iz, float l, 
-                                   float var1, float var2)
+                                   float motor_gain, float var1, float var2)
     {
        int num_trees = 5;
        //Get thread and block index
        int tdx = threadIdx.x;
        int bdx = blockIdx.x;
-       float gravity = 9.81;
-       float max_speed = 9000;
-       float min_speed = 1000;
-       float max_thrust = 5832.23;
-       float min_thrust = -2167.77;
-       float max_tilt = 4000;
-       float min_tilt = -4000;
        //Initialize local state
        float s[STATE_DIM];
        float p[STATE_DIM];
@@ -640,7 +644,7 @@ class M_Pi_2:
           }
        }
     }
-    """%(T, ceiling_height, world_radius, control_dimensions, state_dimensions, self.K)
+    """%(self.T, self.K, self.dt, state_dimensions, control_dimensions, Ix, Iy, Iz, total_mass, l, gravity, max_rotor_speed, min_rotor_speed, max_thrust, min_thrust, max_tilt, min_tilt)
         mod = SourceModule(template)
         func = mod.get_function("rollout_kernel")
         U_d = mod.get_global("U_d")[0]
