@@ -32,6 +32,7 @@ Define some parameters for the virtual quad-rotor
 M = .15
 m = .02
 total_mass = .25
+total_radius = .15
 l = .1
 R = .05
 Ix = .4*(M*R**2 + l**2*m)
@@ -180,6 +181,7 @@ class M_Pi_2:
         X = []
         Y = []
         Z = []
+        #Defines the control cost matrix and state weighting vector for PI^2
         A = np.zeros(16,dtype=np.float32)
         A[:3] = 5
         A[3:12] = 1
@@ -192,12 +194,12 @@ class M_Pi_2:
         p_d = self.on_gpu(p)
         U = np.zeros(T*4, dtype = np.float32)
         U = self.on_gpu(U)
-        var = 500
+        var = 400
         #Takeoff!
         while((abs(self.state[8]) > .05 or abs(2 - self.state[2]) > .05)):
             U = self.rollouts(U, var, 0, p_d, A_d, R_d)
             U_old = U.get()
-            info = self.plotter(U_old.reshape(T,4), self.state, 1, plot=False)
+            info = self.simulator(U_old.reshape(T,4), self.state, 1)
             self.state= info[0]
             self.state_d = self.on_gpu(info[0])
             X.extend(info[1])
@@ -209,15 +211,20 @@ class M_Pi_2:
         print "Takeoff Succesfull, current state: "
         print self.state
         print
+        #Now pursuit of the point begins
         p = np.array([1,1,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32)
         p_d = self.on_gpu(p)
         count = 0
-        while(count < 2000):
+        max_speed = 0
+        while(count < 1500):
+            print count
             U = self.rollouts(U, 500, 1.5, p_d, A_d, R_d)
             U_old = U.get()
-            info = self.plotter(U_old.reshape(T,4), self.state,1,trees = self.forest, plot=False)
+            info = self.simulator(U_old.reshape(T,4), self.state,1)
             self.state= info[0]
             self.state_d = self.on_gpu(info[0])
+            if (np.sqrt(info[0][6]**2 + info[0][7]**2 + info[0][8]**2) > max_speed):
+                max_speed = np.sqrt(info[0][6]**2 + info[0][7]**2 + info[0][8]**2)
             X.extend(info[1])
             Y.extend(info[2])
             Z.extend(info[3])
@@ -225,31 +232,25 @@ class M_Pi_2:
             U_new[:(T-1)*4] = U_old[4:]
             U = self.on_gpu(U_new)
             if count < 1100:
-                p[:2] += .02
+                p[:2] += .04
                 p_d = self.on_gpu(p)
             count += 1
+        print "Final Point Destination"
         print p
+        print
+        print "Final Quadrotor Destination"
         print self.state
-        fig = plt.figure()
-        ax = fig.gca(projection = '3d')
-        X = np.array(X)
-        Y = np.array(Y)
-        Z = np.array(Z)
-        for i in range(len(forest)/4):
-            self.draw_tree(ax, (self.forest[4*i:4*(i+1)]))
-        ax.scatter(X,Y,Z)
-        ax.set_xlim3d(0, 25)
-        ax.set_ylim3d(0, 25)
-        plt.show()
-
+        print 
+        print "Maximum Speed"
+        print max_speed
+        #self.plotter(X,Y,Z)
+        self.plotter(X,Y,Z,d2_plot=True)
+       
     def draw_tree(self, ax, tree_info):
         x,y,h,r = tree_info
         U = np.arange(0,2*np.pi, .05)
         length = U.size
-        #print length
-        #print h
         V = np.arange(0,h,h/(1.0*length))
-        #print V.size
         X = np.zeros((length,length))
         Y = np.zeros((length,length))
         Z = np.zeros((length,length))
@@ -258,12 +259,34 @@ class M_Pi_2:
             Y[:,i] = np.sin(U)*r + y
             Z[:,i] = V[i]
         ax.plot_surface(X,Y,Z)
+
+    def plotter(self, X,Y,Z, d2_plot = False):
+        X = np.array(X)
+        Y = np.array(Y)
+        Z = np.array(Z)
+        if (not d2_plot):
+            fig = plt.figure()
+            ax = fig.gca(projection = '3d')
+            for i in range(len(self.forest)/4):
+                self.draw_tree(ax, (self.forest[4*i:4*(i+1)]))
+            ax.scatter(X,Y,Z)
+            ax.set_xlim3d(0, 25)
+            ax.set_ylim3d(0, 25)
+        else:
+            fig = plt.gcf()
+            ax = plt.gca()
+            for i in range(len(self.forest)/4):
+                circ = plt.Circle((self.forest[4*i],self.forest[4*i + 1]), self.forest[4*i + 3], color = 'r')
+                fig.gca().add_artist(circ)
+            ax.set_xlim(0,25)
+            ax.set_ylim(0,25)
+            ax.plot(X,Y)
+        plt.show()
+ 
         
-    def plotter(self, U, state, jumps, trees = [], plot = False):
+    def simulator(self, U, state, steps):
         dt = self.dt
         T = self.T
-        #fig = plt.figure()
-        #ax = fig.gca(projection='3d')
         X = []
         Y = []
         Z = []
@@ -273,12 +296,12 @@ class M_Pi_2:
         max_speed = 9000
         min_speed = 1000
         vel = []
-        for t in range(jumps):
-            for i in range(len(trees)/4):
-                if np.sqrt((s[0] - trees[4*i + 0])**2 + (s[1] - trees[4*i + 1])**2) < trees[4*i + 3] and trees[4*i + 2] > s[2]:     
+        for t in range(steps):
+            for i in range(len(self.forest)/4):
+                if np.sqrt((s[0] - self.forest[4*i + 0])**2 + (s[1] - self.forest[4*i + 1])**2) < self.forest[4*i + 3]+total_radius and self.forest[4*i + 2] > s[2]:     
                     for k in range(1):
                         print "HIT A TREE!"
-                        print trees[4*i:4*i+3]
+                        print self.forest[4*i:4*i+3]
                         print s
                     break
             w[0] = hover_speed + U[t,0] - U[t,2] + U[t,3];
@@ -301,13 +324,6 @@ class M_Pi_2:
                 w[3] = max_speed
             elif (w[3] < min_speed):
                 w[3] = min_speed
-           
-            #print 
-            #print "----------------------------------------"
-            #print w
-            #print
-            #if (abs(s[3]) > 1):
-            #    print "DANGER"
             s[0] += dt*s[6]
             s[1] += dt*s[7]
             s[2] += dt*s[8]
@@ -341,24 +357,13 @@ class M_Pi_2:
             s[13] += motor_gain*dt*(w[1] - s[13])
             s[14] += motor_gain*dt*(w[2] - s[14])
             s[15] += motor_gain*dt*(w[3] - s[15])
-
-        if (plot == True):
-            X = np.array(X)
-            Y = np.array(Y)
-            Z = np.array(Z)
-            ax.scatter(X,Y,Z)
-            ax.set_xlim3d(-10, 10)
-            ax.set_ylim3d(-10, 10)
-            plt.show()
-            print s
         return s, X, Y, Z
-    
-    def make_forest(self, forest):
-        return 0
-    
-    def get_sub_forest(self, forest, pos):
-        return 0
 
+    def on_gpu(self,a):
+        a = a.flatten()
+        a = np.require(a, dtype = np.float32, requirements = ['A', 'O', 'W', 'C'])
+        a_d = gpuarray.to_gpu(a)
+        return a_d
     
     """==========================================================================================="""
     #################################################################################################
@@ -389,6 +394,7 @@ class M_Pi_2:
     #define Iy %f
     #define Iz %f
     #define mass %f
+    #define total_radius %f
     #define l %f
     #define gravity %f
     #define max_speed %f
@@ -408,7 +414,7 @@ class M_Pi_2:
        }
        int i;
        for (i = 0; i < num_trees; i++) {
-           if (sqrt((s[0]-t[4*i + 0])*(s[0]-t[4*i + 0]) + (s[1]-t[4*i + 1])*(s[1]-t[4*i +1])) < t[4*i + 3] && s[2] < t[4*i + 2]) {
+           if (sqrt((s[0]-t[4*i + 0])*(s[0]-t[4*i + 0]) + (s[1]-t[4*i + 1])*(s[1]-t[4*i +1])) < t[4*i + 3]+total_radius && s[2] < t[4*i + 2]) {
            crash = 1;
            }
        }
@@ -617,7 +623,7 @@ class M_Pi_2:
           }
        }
     }
-    """%(self.T, self.K, self.dt, state_dimensions, control_dimensions, Ix, Iy, Iz, total_mass, l, gravity, max_rotor_speed, min_rotor_speed, max_thrust, min_thrust, max_tilt, min_tilt)
+    """%(self.T, self.K, self.dt, state_dimensions, control_dimensions, Ix, Iy, Iz, total_mass, total_radius, l, gravity, max_rotor_speed, min_rotor_speed, max_thrust, min_thrust, max_tilt, min_tilt)
         mod = SourceModule(template)
         func = mod.get_function("rollout_kernel")
         U_d = mod.get_global("U_d")[0]
@@ -725,20 +731,14 @@ class M_Pi_2:
         mod = SourceModule(template)
         return mod.get_function("multiplier")
 
-    def on_gpu(self,a):
-        a = a.flatten()
-        a = np.require(a, dtype = np.float32, requirements = ['A', 'O', 'W', 'C'])
-        a_d = gpuarray.to_gpu(a)
-        return a_d
-
 if __name__ == "__main__":
     state= np.zeros(16, dtype=np.float32)
     T = 150
     K = 1000
     time_horizon = 3
     forest = []
-    for i in range(1,10):
-        for j in range(1,10):
+    for i in range(1,20):
+        for j in range(1,20):
             forest.extend([2*i, 2*j, 10, .1])
     A = M_Pi_2(state, forest, K, time_horizon, T)
     A.multi_pi()
