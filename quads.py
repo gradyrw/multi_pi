@@ -19,6 +19,7 @@ import math
 from datetime import datetime
 import pickle
 import time
+import copy
 
 """
 Define some parameters regarding the world
@@ -94,10 +95,10 @@ class M_Pi_2:
 
     def rollouts(self, U, var1, var2, goal_state_d, A_d, R_d):
         forest = []
-        for i in range(len(self.forest)//4):
-            if np.sqrt((self.state[0] - self.forest[4*i])**2 + (self.state[1] - self.forest[4*i+1])**2) < 9:
-                forest.extend(self.forest[4*i:4*(i+1)])
-        num_trees = len(forest)//4
+        for i in range(len(self.forest)//6):
+            if np.sqrt((self.state[0] - self.forest[6*i])**2 + (self.state[1] - self.forest[6*i+1])**2) < 9:
+                forest.extend(self.forest[6*i:6*(i+1)])
+        num_trees = len(forest)//6
         if (num_trees is not 0):
             self.forest_d = self.on_gpu(np.array(forest,dtype=np.float32))
         print num_trees
@@ -197,6 +198,7 @@ class M_Pi_2:
         X = []
         Y = []
         Z = []
+        ani_info = []
         #Defines the control cost matrix and state weighting vector for PI^2
         A = np.zeros(16,dtype=np.float32)
         A[:3] = 5
@@ -253,12 +255,13 @@ class M_Pi_2:
             X.extend(info[1])
             Y.extend(info[2])
             Z.extend(info[3])
+            ani_info.append([np.copy(info[0]),copy.copy(info[4])])                  
             U_new = np.zeros(T*4, dtype = np.float32)
             U_new[:(T-1)*4] = U_old[4:]
             U = self.on_gpu(U_new)
             if (count < 1000):
-                p[0] += .03
-                p[1] += .03
+                p[0] += .05
+                p[1] += .05
             p_d = self.on_gpu(p)
             count += 1
             d = np.sqrt((np.sum(self.state[:3] - p[:3])**2))
@@ -273,9 +276,13 @@ class M_Pi_2:
         print 
         print "Maximum Speed"
         print max_speed
-        #self.plotter(X,Y,Z)
+        self.dump(ani_info)
         self.plotter(X,Y,Z,d2_plot=True)
         self.plot_controls(U_total)
+
+    def dump(self, ani_info):
+        output = open("static_1.pkl", 'wb')
+        pickle.dump(ani_info, output)
 
     def plot_controls(self, U):
         length = len(U)/8
@@ -319,8 +326,8 @@ class M_Pi_2:
         else:
             fig = plt.gcf()
             ax = plt.gca()
-            for i in range(len(self.forest)/4):
-                circ = plt.Circle((self.forest[4*i],self.forest[4*i + 1]), self.forest[4*i + 3], color = 'r')
+            for i in range(len(self.forest)/6):
+                circ = plt.Circle((self.forest[6*i],self.forest[6*i + 1]), self.forest[6*i + 3], color = 'r')
                 fig.gca().add_artist(circ)
             ax.set_xlim(-10,70)
             ax.set_ylim(-10,70)
@@ -334,23 +341,20 @@ class M_Pi_2:
         X = []
         Y = []
         Z = []
+        tree_info = []
         s = state
         hover_speed = 3167.77
         w = np.zeros(4)
         max_speed = 9000
         min_speed = 1000
         vel = []
-        for i in range(len(self.forest)):
-            if (i % 4 == 0):
-                self.forest[i] += .005
-        self.forest_d = self.on_gpu(np.array(forest))
         for t in range(steps):
             noise = np.random.randn(6)*0
-            for i in range(len(self.forest)/4):
-                if np.sqrt((s[0] - self.forest[4*i + 0])**2 + (s[1] - self.forest[4*i + 1])**2) < self.forest[4*i + 3]+total_radius and self.forest[4*i + 2] > s[2]:     
+            for i in range(len(self.forest)/6):
+                if np.sqrt((s[0] - self.forest[6*i + 0])**2 + (s[1] - self.forest[6*i + 1])**2) < self.forest[6*i + 3]+total_radius and self.forest[6*i + 2] > s[2]:     
                     for k in range(1):
                         print "HIT A TREE!"
-                        print self.forest[4*i:4*i+3]
+                        print self.forest[6*i:6*i+3]
                         print s
                     break
             w[0] = hover_speed + U[t,0] - U[t,2] + U[t,3];
@@ -406,7 +410,12 @@ class M_Pi_2:
             s[13] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[1] - s[13])
             s[14] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[2] - s[14])
             s[15] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[3] - s[15])
-        return s, X, Y, Z
+            for i in range(len(self.forest)/6):
+                self.forest[6*i] += self.forest[6*i + 4]*dt
+                self.forest[6*i + 1] += self.forest[6*i + 5]*dt
+                tree_info.append([self.forest[6*i],self.forest[6*i+1],self.forest[6*i+2],self.forest[6*i+3]])
+            self.forest_d = self.on_gpu(np.array(self.forest))
+        return s, X, Y, Z, tree_info
 
     def on_gpu(self,a):
         a = a.flatten()
@@ -463,7 +472,7 @@ class M_Pi_2:
        }
        int i;
        for (i = 0; i < num_trees; i++) {
-           if (sqrt((s[0]-t[4*i + 0])*(s[0]-t[4*i + 0]) + (s[1]-t[4*i + 1])*(s[1]-t[4*i +1])) < t[4*i + 3]+total_radius && s[2] < t[4*i + 2]) {
+           if (sqrt((s[0]-t[6*i + 0])*(s[0]-t[6*i + 0]) + (s[1]-t[6*i + 1])*(s[1]-t[6*i +1])) < t[6*i + 3]+total_radius && s[2] < t[6*i + 2]) {
            crash = 1;
            }
        }
@@ -489,7 +498,7 @@ class M_Pi_2:
        float min = 10000;
        int i,j;
        for (j = 0; j < num_trees; j++) {
-           float temp = sqrt((s[0]-trees[4*j + 0])*(s[0]-trees[4*j + 0]) + (s[1]-trees[4*j + 1])*(s[1]-trees[4*j +1]));
+           float temp = sqrt((s[0]-trees[6*j + 0])*(s[0]-trees[6*j + 0]) + (s[1]-trees[6*j + 1])*(s[1]-trees[6*j +1]));
            if (temp < min) {
               min = temp;
            }
@@ -794,7 +803,7 @@ if __name__ == "__main__":
     forest = []
     for i in range(1,20):
         for j in range(1,20):
-            r = np.random.randn(2)
-            forest.extend([3*i + r[0], 3*j + r[1], 10, .1])
+            r = np.random.randn(4)
+            forest.extend([3*i + r[0], 3*j + r[1], 10, .1, 3*np.cos(r[2]*3.14), 3*np.sin(r[3]*3.14)])
     A = M_Pi_2(state, forest, K, time_horizon, T)
     A.multi_pi()
