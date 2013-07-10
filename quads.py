@@ -93,6 +93,14 @@ class M_Pi_2:
         self.funcs = rollout_kernel, cost_to_go, reduction, multiply, U_d
 
     def rollouts(self, U, var1, var2, goal_state_d, A_d, R_d):
+        forest = []
+        for i in range(len(self.forest)//4):
+            if np.sqrt((self.state[0] - self.forest[4*i])**2 + (self.state[1] - self.forest[4*i+1])**2) < 9:
+                forest.extend(self.forest[4*i:4*(i+1)])
+        num_trees = len(forest)//4
+        if (num_trees is not 0):
+            self.forest_d = self.on_gpu(np.array(forest,dtype=np.float32))
+        print num_trees
         #Get an array of random numbers from CUDA. The numbers are
         #standard normal, the variance is changed later on in the rollout_kernel
         du_d = self.generator.gen_normal(self.K*self.T*(control_dimensions), np.float32)
@@ -106,9 +114,17 @@ class M_Pi_2:
         #Launch the kernel for simulating rollouts
         rollout_kernel(self.controls_d, self.state_costs_d, self.terminal_costs_d,
                        du_d, self.state_d, self.forest_d, goal_state_d, A_d, R_d, 
-                       self.mech_params_d, np.float32(var1), np.float32(var2), np.int32(len(self.forest)//4),
+                       self.mech_params_d, np.float32(var1), np.float32(var2), np.int32(num_trees),
                        grid=gridsize, block=blocksize)
         cuda.Context.synchronize()
+        #d = self.state_costs_d.get()
+        #print "Min of state costs"
+        #minim =  np.min(d)
+        #d = d - minim
+        #self.state_costs_d = self.on_gpu(d)
+        #d = self.state_costs_d.get()
+        #print "Min of state costs"
+        #print np.min(d)
         #Launch the kernel for computing cost-to-go values for each state
         blocksize = (self.T,1,1)
         gridsize = (self.K,1,1)
@@ -196,9 +212,11 @@ class M_Pi_2:
         U = self.on_gpu(U)
         var = 400
         #Takeoff!
-        while((abs(self.state[8]) > .05 or abs(2 - self.state[2]) > .05)):
-            U = self.rollouts(U, var, 0, p_d, A_d, R_d)
+        while(abs(2 - self.state[2]) > .05):
+            start = time.time()
+            U = self.rollouts(U, var, 1.5, p_d, A_d, R_d)
             U_old = U.get()
+            print time.time() - start
             info = self.simulator(U_old.reshape(T,4), self.state, 1)
             self.state= info[0]
             self.state_d = self.on_gpu(info[0])
@@ -216,10 +234,17 @@ class M_Pi_2:
         p_d = self.on_gpu(p)
         count = 0
         max_speed = 0
-        while(count < 1500):
+        direc = 1
+        cycle = 0
+        d = 1000
+        speed = 500
+        U_total = []
+        while(count < 1000):
             print count
             U = self.rollouts(U, 500, 1.5, p_d, A_d, R_d)
             U_old = U.get()
+            U_total.extend(U.get()[:4])
+            U_total.extend(info[0][12:16])
             info = self.simulator(U_old.reshape(T,4), self.state,1)
             self.state= info[0]
             self.state_d = self.on_gpu(info[0])
@@ -231,10 +256,15 @@ class M_Pi_2:
             U_new = np.zeros(T*4, dtype = np.float32)
             U_new[:(T-1)*4] = U_old[4:]
             U = self.on_gpu(U_new)
-            if count < 1100:
-                p[:2] += .04
-                p_d = self.on_gpu(p)
+            if (count < 1000):
+                p[0] += .03
+                p[1] += .03
+            p_d = self.on_gpu(p)
             count += 1
+            d = np.sqrt((np.sum(self.state[:3] - p[:3])**2))
+            speed = np.sqrt(np.sum(self.state[6:9]*self.state[6:9]))
+            print d
+            print "-----------------------"
         print "Final Point Destination"
         print p
         print
@@ -245,6 +275,20 @@ class M_Pi_2:
         print max_speed
         #self.plotter(X,Y,Z)
         self.plotter(X,Y,Z,d2_plot=True)
+        self.plot_controls(U_total)
+
+    def plot_controls(self, U):
+        length = len(U)/8
+        U = np.array(U).reshape(length,8)
+        l = np.arange(length)*self.dt
+        fig = plt.figure()
+        ax = fig.gca()
+        #ax.plot(l, U[:,0])
+        ax.plot(l, U[:,1])
+        ax.plot(l, U[:,2])
+        ax.plot(l, U[:,3])
+        #ax.plot(l, U[:,7])
+        plt.show()
        
     def draw_tree(self, ax, tree_info):
         x,y,h,r = tree_info
@@ -270,16 +314,16 @@ class M_Pi_2:
             for i in range(len(self.forest)/4):
                 self.draw_tree(ax, (self.forest[4*i:4*(i+1)]))
             ax.scatter(X,Y,Z)
-            ax.set_xlim3d(0, 25)
-            ax.set_ylim3d(0, 25)
+            ax.set_xlim3d(0, 60)
+            ax.set_ylim3d(0, 60)
         else:
             fig = plt.gcf()
             ax = plt.gca()
             for i in range(len(self.forest)/4):
                 circ = plt.Circle((self.forest[4*i],self.forest[4*i + 1]), self.forest[4*i + 3], color = 'r')
                 fig.gca().add_artist(circ)
-            ax.set_xlim(0,25)
-            ax.set_ylim(0,25)
+            ax.set_xlim(-10,70)
+            ax.set_ylim(-10,70)
             ax.plot(X,Y)
         plt.show()
  
@@ -296,7 +340,12 @@ class M_Pi_2:
         max_speed = 9000
         min_speed = 1000
         vel = []
+        for i in range(len(self.forest)):
+            if (i % 4 == 0):
+                self.forest[i] += .005
+        self.forest_d = self.on_gpu(np.array(forest))
         for t in range(steps):
+            noise = np.random.randn(6)*0
             for i in range(len(self.forest)/4):
                 if np.sqrt((s[0] - self.forest[4*i + 0])**2 + (s[1] - self.forest[4*i + 1])**2) < self.forest[4*i + 3]+total_radius and self.forest[4*i + 2] > s[2]:     
                     for k in range(1):
@@ -338,25 +387,25 @@ class M_Pi_2:
             s[3] += dt*(np.cos(s[4])*s[9] + np.sin(s[4])*s[11])
             s[4] += dt*(np.sin(s[4])*np.tan(s[3])*s[9] + s[10] - np.cos(s[4])*np.tan(s[3])*s[11])
             s[5] += dt*(-np.sin(s[4])/np.cos(s[3])*s[9] + np.cos(s[4])/np.cos(s[3])*s[11])
-            F_1 = K_f * s[12]**2
-            F_2 = K_f * s[13]**2
-            F_3 = K_f * s[14]**2
-            F_4 = K_f * s[15]**2
+            F_1 = noise[3]*dt*.1*K_f + K_f * s[12]**2
+            F_2 = noise[3]*dt*.1*K_f + K_f * s[13]**2
+            F_3 = noise[3]*dt*.1*K_f + K_f * s[14]**2
+            F_4 = noise[3]*dt*.1*K_f + K_f * s[15]**2
             F_sum = (F_1 + F_2 + F_3 + F_4)/total_mass
-            s[6] += dt*F_sum*(np.cos(s[5])*np.sin(s[4]) + np.cos(s[4])*np.sin(s[5])*np.sin(s[3]))
-            s[7] += dt*F_sum*(np.sin(s[5])*np.sin(s[4]) - np.cos(s[5])*np.cos(s[4])*np.sin(s[3]))
-            s[8] += dt*(F_sum*(np.cos(s[3])*np.cos(s[4])) - 9.81)
+            s[6] += dt*F_sum*(np.cos(s[5])*np.sin(s[4]) + np.cos(s[4])*np.sin(s[5])*np.sin(s[3])) + (.2 + noise[0])*dt*.1
+            s[7] += dt*F_sum*(np.sin(s[5])*np.sin(s[4]) - np.cos(s[5])*np.cos(s[4])*np.sin(s[3])) + noise[1]*dt*.1
+            s[8] += dt*(F_sum*(np.cos(s[3])*np.cos(s[4])) - 9.81) + noise[2]*dt*.1
             s[9] += dt/Ix * (l*(F_2 - F_4) - s[10]*s[11]*(Iz - Iy))
             s[10] += dt/Iy * (l*(F_3 - F_1) - s[9]*s[11]*(Ix - Iz))
-            M_1 = K_m*s[12]**2
-            M_2 = K_m*s[13]**2
-            M_3 = K_m*s[14]**2
-            M_4 = K_m*s[15]**2
+            M_1 = ((noise[4]*.1*K_m) + K_m)*s[12]**2
+            M_2 = ((noise[4]*.1*K_m) + K_m)*s[13]**2
+            M_3 = ((noise[4]*.1*K_m) + K_m)*s[14]**2
+            M_4 = ((noise[4]*.1*K_m) + K_m)*s[15]**2
             s[11] += dt/Iz * (M_1 - M_2 + M_3 - M_4 - s[9]*s[10]*(Iy - Ix))
-            s[12] += motor_gain*dt*(w[0] - s[12])
-            s[13] += motor_gain*dt*(w[1] - s[13])
-            s[14] += motor_gain*dt*(w[2] - s[14])
-            s[15] += motor_gain*dt*(w[3] - s[15])
+            s[12] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[0] - s[12])
+            s[13] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[1] - s[13])
+            s[14] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[2] - s[14])
+            s[15] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[3] - s[15])
         return s, X, Y, Z
 
     def on_gpu(self,a):
@@ -424,8 +473,7 @@ class M_Pi_2:
    /***********************************************************************************************
    Computes the immediate state cost of the system. 
    ************************************************************************************************/
-    __device__ float get_state_cost(float* s, float* u, float* p, float* trees, float* A, float* R, float t, 
-                                    int num_trees)
+    __device__ float get_state_cost(float* s, float* u, float* p, float* trees, float* A, float* R, int num_trees)
     { 
        float cost = 0;
        //Computes the penalties for the state cost
@@ -438,12 +486,19 @@ class M_Pi_2:
        if (fabs(s[3]) > 1.4) {
           tilt_penalty = 100;
        }
-       if (get_crash(s, trees, num_trees) == 1) {
-          crash_penalty = 1000;
-       }
-       cost += ground_penalty + tilt_penalty + crash_penalty;
-       //Computes the control cost
+       float min = 10000;
        int i,j;
+       for (j = 0; j < num_trees; j++) {
+           float temp = sqrt((s[0]-trees[4*j + 0])*(s[0]-trees[4*j + 0]) + (s[1]-trees[4*j + 1])*(s[1]-trees[4*j +1]));
+           if (temp < min) {
+              min = temp;
+           }
+       }
+       if (get_crash(s, trees, num_trees) == 1) {
+          crash_penalty = 200;
+       }
+       cost += ground_penalty + tilt_penalty + crash_penalty + 10*exp(-min); 
+       //Computes the control cost
        float control_cost = 0;
        for (i = 0; i < CONTROL_DIM; i++) {
           float temp = 0;
@@ -608,7 +663,7 @@ class M_Pi_2:
                 s[15] += dt*motor_gain*(w[3] - s[15]);
              }
              //Get State Costs
-             float cost = get_state_cost(s, u, p, trees, A, R, i, num_trees);
+             float cost = get_state_cost(s, u, p, trees, A, R, num_trees);
              //Record the state costs
              state_costs_d[(blockDim.x*bdx + tdx)*T + i] = cost;
              //Record the control costs
@@ -739,6 +794,7 @@ if __name__ == "__main__":
     forest = []
     for i in range(1,20):
         for j in range(1,20):
-            forest.extend([2*i, 2*j, 10, .1])
+            r = np.random.randn(2)
+            forest.extend([3*i + r[0], 3*j + r[1], 10, .1])
     A = M_Pi_2(state, forest, K, time_horizon, T)
     A.multi_pi()
