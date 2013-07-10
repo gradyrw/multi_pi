@@ -197,6 +197,7 @@ class M_Pi_2:
         X = []
         Y = []
         Z = []
+        ani_info = []
         #Defines the control cost matrix and state weighting vector for PI^2
         A = np.zeros(16,dtype=np.float32)
         A[:3] = 5
@@ -216,13 +217,14 @@ class M_Pi_2:
             start = time.time()
             U = self.rollouts(U, var, 1.5, p_d, A_d, R_d)
             U_old = U.get()
-            print time.time() - start
             info = self.simulator(U_old.reshape(T,4), self.state, 1)
             self.state= info[0]
+            print self.state
             self.state_d = self.on_gpu(info[0])
             X.extend(info[1])
             Y.extend(info[2])
             Z.extend(info[3])
+            ani_info.append([X,Y,info[4]])
             U_new = np.zeros(T*4, dtype = np.float32)
             U_new[:(T-1)*4] = U_old[4:]
             U = self.on_gpu(U_new)
@@ -253,6 +255,7 @@ class M_Pi_2:
             X.extend(info[1])
             Y.extend(info[2])
             Z.extend(info[3])
+            ani_info.append([X,Y],[info[4]])
             U_new = np.zeros(T*4, dtype = np.float32)
             U_new[:(T-1)*4] = U_old[4:]
             U = self.on_gpu(U_new)
@@ -263,8 +266,6 @@ class M_Pi_2:
             count += 1
             d = np.sqrt((np.sum(self.state[:3] - p[:3])**2))
             speed = np.sqrt(np.sum(self.state[6:9]*self.state[6:9]))
-            print d
-            print "-----------------------"
         print "Final Point Destination"
         print p
         print
@@ -274,8 +275,13 @@ class M_Pi_2:
         print "Maximum Speed"
         print max_speed
         #self.plotter(X,Y,Z)
-        self.plotter(X,Y,Z,d2_plot=True)
-        self.plot_controls(U_total)
+        #self.plotter(X,Y,Z,d2_plot=True)
+        #self.plot_controls(U_total)
+        self.dumper(ani_info)
+
+    def dumper(self, ani_info):
+        file_name = "static_1"
+        pickle.dump(ani_info, file_name)
 
     def plot_controls(self, U):
         length = len(U)/8
@@ -334,23 +340,20 @@ class M_Pi_2:
         X = []
         Y = []
         Z = []
+        tree_locs = []
         s = state
         hover_speed = 3167.77
         w = np.zeros(4)
         max_speed = 9000
         min_speed = 1000
         vel = []
-        for i in range(len(self.forest)):
-            if (i % 4 == 0):
-                self.forest[i] += .005
-        self.forest_d = self.on_gpu(np.array(forest))
         for t in range(steps):
             noise = np.random.randn(6)*0
-            for i in range(len(self.forest)/4):
-                if np.sqrt((s[0] - self.forest[4*i + 0])**2 + (s[1] - self.forest[4*i + 1])**2) < self.forest[4*i + 3]+total_radius and self.forest[4*i + 2] > s[2]:     
+            for i in range(len(self.forest)/6):
+                if np.sqrt((s[0] - self.forest[6*i + 0])**2 + (s[1] - self.forest[6*i + 1])**2) < self.forest[6*i + 3]+total_radius and self.forest[6*i + 2] > s[2]:     
                     for k in range(1):
                         print "HIT A TREE!"
-                        print self.forest[4*i:4*i+3]
+                        print self.forest[6*i:6*i+3]
                         print s
                     break
             w[0] = hover_speed + U[t,0] - U[t,2] + U[t,3];
@@ -406,7 +409,12 @@ class M_Pi_2:
             s[13] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[1] - s[13])
             s[14] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[2] - s[14])
             s[15] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[3] - s[15])
-        return s, X, Y, Z
+            for i in range(len(self.forest)/6):
+                self.forest[6*i] += self.forest[6*i + 4]*dt
+                self.forest[6*i + 1] += self.forest[6*i + 4]*dt
+                tree_locs.append([self.forest[6*i], self.forest[6*i + 1]])
+        self.forest_d = self.on_gpu(np.array(self.forest))
+        return s, X, Y, Z, tree_locs
 
     def on_gpu(self,a):
         a = a.flatten()
@@ -794,7 +802,7 @@ if __name__ == "__main__":
     forest = []
     for i in range(1,20):
         for j in range(1,20):
-            r = np.random.randn(2)
-            forest.extend([3*i + r[0], 3*j + r[1], 10, .1])
+            r = np.random.randn(4)
+            forest.extend([3*i + r[0], 3*j + r[1], 10, .1, np.cos(r[2]), np.sin(r[3])])
     A = M_Pi_2(state, forest, K, time_horizon, T)
     A.multi_pi()
