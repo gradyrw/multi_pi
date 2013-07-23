@@ -41,7 +41,7 @@ Iy = Ix
 Iz = .4*M*R**2 + 4*l**2*m
 K_m = 1.5e-9
 K_f = 6.11e-8
-motor_gain = 1.0
+motor_gain = .05
 max_rotor_speed = 9000.0
 min_rotor_speed = 1000.0
 max_thrust = 5832.23
@@ -96,12 +96,12 @@ class M_Pi_2:
     def rollouts(self, U, var1, var2, goal_state_d, A_d, R_d):
         forest = []
         for i in range(len(self.forest)//6):
-            if np.sqrt((self.state[0] - self.forest[6*i])**2 + (self.state[1] - self.forest[6*i+1])**2) < 9:
+            if np.sqrt((self.state[0] - self.forest[6*i])**2 + (self.state[1] - self.forest[6*i+1])**2) < 12:
                 forest.extend(self.forest[6*i:6*(i+1)])
         num_trees = len(forest)//6
+        print num_trees
         if (num_trees is not 0):
             self.forest_d = self.on_gpu(np.array(forest,dtype=np.float32))
-        print num_trees
         #Get an array of random numbers from CUDA. The numbers are
         #standard normal, the variance is changed later on in the rollout_kernel
         du_d = self.generator.gen_normal(self.K*self.T*(control_dimensions), np.float32)
@@ -118,19 +118,16 @@ class M_Pi_2:
                        self.mech_params_d, np.float32(var1), np.float32(var2), np.int32(num_trees),
                        grid=gridsize, block=blocksize)
         cuda.Context.synchronize()
+        #print "State Costs"
         #d = self.state_costs_d.get()
-        #print "Min of state costs"
-        #minim =  np.min(d)
-        #d = d - minim
-        #self.state_costs_d = self.on_gpu(d)
-        #d = self.state_costs_d.get()
-        #print "Min of state costs"
-        #print np.min(d)
+        #print d[0:150]
+        #print np.mean(d)
+        a = 10000
+        a = gpuarray.to_gpu(np.array(a,dtype=np.float32))
         #Launch the kernel for computing cost-to-go values for each state
         blocksize = (self.T,1,1)
         gridsize = (self.K,1,1)
-        start = datetime.now()
-        cost_to_go(self.state_costs_d, self.terminal_costs_d, block=blocksize, grid=gridsize)
+        cost_to_go(self.state_costs_d, self.terminal_costs_d, a, block=blocksize, grid=gridsize)
         cuda.Context.synchronize()
         #Compute the normalizer, the normalizer is an array with T indices which
         #contains the sums of columns of state_costs_d        
@@ -191,6 +188,9 @@ class M_Pi_2:
         U = self.on_gpu(U)
         #Defines the initial state of the quadrotors
         init_pos = np.zeros(16)
+        init_pos[0] = 0
+        init_pos[1] = 0
+        init_pos[2] = 3
         init_pos[12:] = 3167.77
         self.state= init_pos
         self.state_d = self.on_gpu(init_pos)
@@ -201,10 +201,8 @@ class M_Pi_2:
         ani_info = []
         #Defines the control cost matrix and state weighting vector for PI^2
         A = np.zeros(16,dtype=np.float32)
-        A[:3] = 5
-        A[3:12] = 1
-        A *= .5
-        R = np.identity(4, dtype = np.float32)*(1/1000000.0)
+        A = np.array([2.5,2.5,5.0,1,1,1.5,1.25,1.25,1.25,.15,.15,.5, 0,0,0,0])
+        R = np.identity(4, dtype = np.float32)*(1/100000.0)
         A_d = self.on_gpu(A)
         R_d = self.on_gpu(R)
         #Prepares the quadrotor for takeoff, p is the point it's aiming at.
@@ -214,7 +212,7 @@ class M_Pi_2:
         U = self.on_gpu(U)
         var = 400
         #Takeoff!
-        while(abs(2 - self.state[2]) > .05):
+        while(self.state[2] < 2):
             start = time.time()
             U = self.rollouts(U, var, 1.5, p_d, A_d, R_d)
             U_old = U.get()
@@ -230,9 +228,14 @@ class M_Pi_2:
             U = self.on_gpu(U_new)
         print "Takeoff Succesfull, current state: "
         print self.state
-        print
+        print 
         #Now pursuit of the point begins
-        p = np.array([1,1,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32)
+        points = [np.array([105,20,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([-5,40,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([105,60,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([-5,80,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([105,100,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([105,105,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32)]
         p_d = self.on_gpu(p)
         count = 0
         max_speed = 0
@@ -240,33 +243,54 @@ class M_Pi_2:
         cycle = 0
         d = 1000
         speed = 500
-        U_total = []
-        while(count < 1000):
+        goal = []
+        i = 0
+        p = points[i]
+        val = 0
+        while(i < 5):
             print count
-            U = self.rollouts(U, 500, 1.5, p_d, A_d, R_d)
+            print "Loc"
+            print self.state[0:12]
+            if np.isnan(val):
+                break
+            if (self.state[2] < .1):
+                break
+            val = (self.state[0] - p[0])**2 + (self.state[1] - p[1])**2
+            if (val > 100):
+                p_effec_d = self.point_normalizer(self.state,p,10,goal)
+            elif (val < 50 and i < 5):
+                i += 1
+                if i == 5:
+                    break
+                p = points[i]
+                p_effec_d = self.point_normalizer(self.state,p,10,goal)
+                if count % 2 == 0:
+                    goal.append([p[0],p[1]])
+            else:
+                if (count % 2 == 0):
+                    goal.append([p[0],p[1]])
+                p_effec_d = self.on_gpu(p)
+            U = self.rollouts(U, 400, 7.5, p_effec_d, A_d, R_d)
             U_old = U.get()
-            U_total.extend(U.get()[:4])
-            U_total.extend(info[0][12:16])
             info = self.simulator(U_old.reshape(T,4), self.state,1)
             self.state= info[0]
+            if (info[-1]):
+                print "Hit"
+                break
             self.state_d = self.on_gpu(info[0])
             if (np.sqrt(info[0][6]**2 + info[0][7]**2 + info[0][8]**2) > max_speed):
                 max_speed = np.sqrt(info[0][6]**2 + info[0][7]**2 + info[0][8]**2)
             X.extend(info[1])
             Y.extend(info[2])
             Z.extend(info[3])
-            ani_info.append([np.copy(info[0]),copy.copy(info[4])])                  
+            if count % 2 == 0:
+                ani_info.append([np.copy(info[0]),copy.deepcopy(info[4])])                  
             U_new = np.zeros(T*4, dtype = np.float32)
             U_new[:(T-1)*4] = U_old[4:]
             U = self.on_gpu(U_new)
-            if (count < 1000):
-                p[0] += .05
-                p[1] += .05
-            p_d = self.on_gpu(p)
             count += 1
             d = np.sqrt((np.sum(self.state[:3] - p[:3])**2))
             speed = np.sqrt(np.sum(self.state[6:9]*self.state[6:9]))
-            print d
             print "-----------------------"
         print "Final Point Destination"
         print p
@@ -276,13 +300,34 @@ class M_Pi_2:
         print 
         print "Maximum Speed"
         print max_speed
-        self.dump(ani_info)
+        if count > 5000:
+            self.dump(ani_info,goal)
         self.plotter(X,Y,Z,d2_plot=True)
-        self.plot_controls(U_total)
+    
+    def point_normalizer(self,quad_pos, point,r, goal):
+        x,y = quad_pos[0], quad_pos[1]
+        p = point[0]
+        q = point[1]
+        t = r/np.sqrt(p**2 + q**2 - 2*p*x + x**2 - 2*q*y + y**2)
+        a = (1-t)*x + t*p
+        b = (1-t)*y + t*q
+        p_effec = np.copy(point)
+        p_effec[0] = a
+        p_effec[1] = b
+        goal.append([a,b])
+        p_effec_d = self.on_gpu(p_effec)
+        return p_effec_d
 
-    def dump(self, ani_info):
-        output = open("static_1.pkl", 'wb')
-        pickle.dump(ani_info, output)
+    def dump(self, ani_info,goal):
+        K = len(ani_info)
+        states = np.zeros((K, 16))
+        trees = np.zeros((K, len(ani_info[0][1]), 4))
+        for i in range(K):
+            states[i,:] = ani_info[i][0]
+            for j in range(len(self.forest)/6):
+                trees[i, j, :] = np.array(ani_info[i][1][j])
+        output = open('no_restraints2.npy', 'wb')
+        np.savez(output, states,trees,np.array(goal))
 
     def plot_controls(self, U):
         length = len(U)/8
@@ -329,8 +374,8 @@ class M_Pi_2:
             for i in range(len(self.forest)/6):
                 circ = plt.Circle((self.forest[6*i],self.forest[6*i + 1]), self.forest[6*i + 3], color = 'r')
                 fig.gca().add_artist(circ)
-            ax.set_xlim(-10,70)
-            ax.set_ylim(-10,70)
+            ax.set_xlim(-10,110)
+            ax.set_ylim(-10,110)
             ax.plot(X,Y)
         plt.show()
  
@@ -348,15 +393,12 @@ class M_Pi_2:
         max_speed = 9000
         min_speed = 1000
         vel = []
+        hit = False
         for t in range(steps):
-            noise = np.random.randn(6)*0
+            noise = 0*np.random.randn(6)
             for i in range(len(self.forest)/6):
                 if np.sqrt((s[0] - self.forest[6*i + 0])**2 + (s[1] - self.forest[6*i + 1])**2) < self.forest[6*i + 3]+total_radius and self.forest[6*i + 2] > s[2]:     
-                    for k in range(1):
-                        print "HIT A TREE!"
-                        print self.forest[6*i:6*i+3]
-                        print s
-                    break
+                    hit = True
             w[0] = hover_speed + U[t,0] - U[t,2] + U[t,3];
             w[1] = hover_speed + U[t,0] + U[t,1] - U[t,3];
             w[2] = hover_speed + U[t,0] + U[t,2] + U[t,3];
@@ -377,9 +419,9 @@ class M_Pi_2:
                 w[3] = max_speed
             elif (w[3] < min_speed):
                 w[3] = min_speed
-            s[0] += dt*s[6]
-            s[1] += dt*s[7]
-            s[2] += dt*s[8]
+            s[0] += dt*(s[6] + noise[0]*.1)
+            s[1] += dt*(s[7] + noise[1]*.1)
+            s[2] += dt*(s[8] + noise[2]*.1)
             if (s[2] < 0):
                 s[2] = 0
                 s[8] = 0
@@ -388,34 +430,52 @@ class M_Pi_2:
             Z.append(s[2])
             if (s[2] < 0):
                 s[2] = 0
-            s[3] += dt*(np.cos(s[4])*s[9] + np.sin(s[4])*s[11])
-            s[4] += dt*(np.sin(s[4])*np.tan(s[3])*s[9] + s[10] - np.cos(s[4])*np.tan(s[3])*s[11])
-            s[5] += dt*(-np.sin(s[4])/np.cos(s[3])*s[9] + np.cos(s[4])/np.cos(s[3])*s[11])
-            F_1 = noise[3]*dt*.1*K_f + K_f * s[12]**2
-            F_2 = noise[3]*dt*.1*K_f + K_f * s[13]**2
-            F_3 = noise[3]*dt*.1*K_f + K_f * s[14]**2
-            F_4 = noise[3]*dt*.1*K_f + K_f * s[15]**2
+            s[3] += dt*(np.cos(s[4])*s[9] + np.sin(s[4])*s[11] + .01*noise[3])
+            s[4] += dt*(np.sin(s[4])*np.tan(s[3])*s[9] + s[10] - np.cos(s[4])*np.tan(s[3])*s[11] + .01*noise[4])
+            s[5] += dt*(-np.sin(s[4])/np.cos(s[3])*s[9] + np.cos(s[4])/np.cos(s[3])*s[11] + .01*noise[5])
+            F_1 = K_f * s[12]**2
+            F_2 = K_f * s[13]**2
+            F_3 = K_f * s[14]**2
+            F_4 = K_f * s[15]**2
             F_sum = (F_1 + F_2 + F_3 + F_4)/total_mass
-            s[6] += dt*F_sum*(np.cos(s[5])*np.sin(s[4]) + np.cos(s[4])*np.sin(s[5])*np.sin(s[3])) + (.2 + noise[0])*dt*.1
-            s[7] += dt*F_sum*(np.sin(s[5])*np.sin(s[4]) - np.cos(s[5])*np.cos(s[4])*np.sin(s[3])) + noise[1]*dt*.1
-            s[8] += dt*(F_sum*(np.cos(s[3])*np.cos(s[4])) - 9.81) + noise[2]*dt*.1
+            s[6] += dt*F_sum*(np.cos(s[5])*np.sin(s[4]) + np.cos(s[4])*np.sin(s[5])*np.sin(s[3]))
+            s[7] += dt*F_sum*(np.sin(s[5])*np.sin(s[4]) - np.cos(s[5])*np.cos(s[4])*np.sin(s[3]))
+            s[8] += dt*(F_sum*(np.cos(s[3])*np.cos(s[4])) - 9.81)
             s[9] += dt/Ix * (l*(F_2 - F_4) - s[10]*s[11]*(Iz - Iy))
             s[10] += dt/Iy * (l*(F_3 - F_1) - s[9]*s[11]*(Ix - Iz))
-            M_1 = ((noise[4]*.1*K_m) + K_m)*s[12]**2
-            M_2 = ((noise[4]*.1*K_m) + K_m)*s[13]**2
-            M_3 = ((noise[4]*.1*K_m) + K_m)*s[14]**2
-            M_4 = ((noise[4]*.1*K_m) + K_m)*s[15]**2
+            M_1 = K_m*s[12]**2
+            M_2 = K_m*s[13]**2
+            M_3 = K_m*s[14]**2
+            M_4 = K_m*s[15]**2
             s[11] += dt/Iz * (M_1 - M_2 + M_3 - M_4 - s[9]*s[10]*(Iy - Ix))
-            s[12] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[0] - s[12])
-            s[13] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[1] - s[13])
-            s[14] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[2] - s[14])
-            s[15] += ((noise[5]*.1*motor_gain) + motor_gain)*dt*(w[3] - s[15])
+            s_actual_1 = (w[0] - s[12])/motor_gain + s[12]
+            s_actual_2 = (w[1] - s[13])/motor_gain + s[13]
+            s_actual_3 = (w[2] - s[14])/motor_gain + s[14]
+            s_actual_4 = (w[3] - s[15])/motor_gain + s[15]
+            s[12] += motor_gain*dt*(s_actual_1 - s[12])
+            s[13] += motor_gain*dt*(s_actual_2 - s[13])
+            s[14] += motor_gain*dt*(s_actual_3 - s[14])
+            s[15] += motor_gain*dt*(s_actual_4 - s[15])
             for i in range(len(self.forest)/6):
-                self.forest[6*i] += self.forest[6*i + 4]*dt
-                self.forest[6*i + 1] += self.forest[6*i + 5]*dt
+                vel = 1.0
+                x,y = self.forest[6*i],self.forest[6*i + 1]
+                p,q = s[0],s[1]
+                a = (p-x)/np.sqrt( (x - s[0])**2 + (x - s[0])**2)
+                b = (q-y)/np.sqrt( (y - s[1])**2 + (x - s[0])**2)
+                if ( np.sqrt((self.forest[6*i]-s[0])**2 + (self.forest[6*i + 1] - s[1])**2) < 12):    
+                    self.forest[6*i + 4] += .5*dt*(vel*a - self.forest[6*i + 4]) 
+                    self.forest[6*i + 5] += .5*dt*(vel*b - self.forest[6*i +5])
+                if (i == 0):
+                    print self.forest[0],self.forest[1]
+                self.forest[6*i] += 0*dt*np.random.randn(1) + self.forest[6*i + 4]*dt
+                self.forest[6*i + 1] += 0*dt*np.random.randn(1)+self.forest[6*i + 5]*dt
+                if (self.forest[6*i] > 100 or self.forest[6*i] < 0):
+                    self.forest[6*i + 4] *= -1
+                if (self.forest[6*i + 1] > 100 or self.forest[6*i + 1] < 0):
+                    self.forest[6*i + 5] *= -1
                 tree_info.append([self.forest[6*i],self.forest[6*i+1],self.forest[6*i+2],self.forest[6*i+3]])
             self.forest_d = self.on_gpu(np.array(self.forest))
-        return s, X, Y, Z, tree_info
+        return s, X, Y, Z, tree_info, hit
 
     def on_gpu(self,a):
         a = a.flatten()
@@ -464,15 +524,15 @@ class M_Pi_2:
     
     __device__ __constant__ float U_d[T*CONTROL_DIM];
     
-    __device__ int get_crash(float* s, float* t, int num_trees) 
+    __device__ int get_crash(float* s, float* t, int num_trees, int step) 
     {
        int crash = 0;
-       if (s[2] < .1 && s[8] < -.1) {
+       if (s[2] < .1 && s[8] < 0) {
           crash = 1;
        }
        int i;
        for (i = 0; i < num_trees; i++) {
-           if (sqrt((s[0]-t[6*i + 0])*(s[0]-t[6*i + 0]) + (s[1]-t[6*i + 1])*(s[1]-t[6*i +1])) < t[6*i + 3]+total_radius && s[2] < t[6*i + 2]) {
+           if ( (sqrt( (s[0] - (t[6*i + 0] + dt*step*t[6*i + 4])) * (s[0] - (t[6*i + 0] + dt*step*t[6*i +4])) + (s[1] - (t[6*i + 1] + dt*step*t[6*i + 5]))*(s[1] - (t[6*i +1] + dt*step*t[6*i + 5])) ) < t[6*i + 3]+.25 + total_radius) && (s[2] < t[6*i + 2]) ) {
            crash = 1;
            }
        }
@@ -482,31 +542,40 @@ class M_Pi_2:
    /***********************************************************************************************
    Computes the immediate state cost of the system. 
    ************************************************************************************************/
-    __device__ float get_state_cost(float* s, float* u, float* p, float* trees, float* A, float* R, int num_trees)
+    __device__ float get_state_cost(float* s, float* u, float* p, float* trees, float* A, float* R, int num_trees, int t)
     { 
        float cost = 0;
        //Computes the penalties for the state cost
        float ground_penalty = 0;
        float tilt_penalty = 0;
        float crash_penalty = 0;
-       if (s[2]*s[2] < .1 && s[8] < 0) {
+       float speed_penalty = 0;
+       if (sqrt(s[0]*s[0] + s[1]*s[1]) > 8) {
+          speed_penalty = 0;
+       } 
+       if (s[2] < .1 && s[8] < 0) {
+          ground_penalty = 1000;
+       }
+       else if (s[2] < 1.2) {
           ground_penalty = 100;
        }
-       if (fabs(s[3]) > 1.4) {
-          tilt_penalty = 100;
+       if (fabs(s[3]) > 2.00 || fabs(s[4]) > 2.00) {
+          tilt_penalty = 0;
        }
-       float min = 10000;
        int i,j;
-       for (j = 0; j < num_trees; j++) {
-           float temp = sqrt((s[0]-trees[6*j + 0])*(s[0]-trees[6*j + 0]) + (s[1]-trees[6*j + 1])*(s[1]-trees[6*j +1]));
-           if (temp < min) {
-              min = temp;
+       if (get_crash(s, trees, num_trees, t) == 1) {
+          crash_penalty = 1000;
+       }
+       cost += ground_penalty + tilt_penalty + crash_penalty + speed_penalty;
+       float min_dis = 1000; 
+       for (i = 0; i < num_trees; i++) {
+           float temp = sqrt( (s[0] - (trees[6*i + 0] + dt*t*trees[6*i + 4])) * (s[0] - (trees[6*i + 0] + dt*t*trees[6*i + 4])) + (s[1] - (trees[6*i + 0] + dt*t*trees[6*i + 5])) * (s[1] - (trees[6*i + 0] + dt*t*trees[6*i + 5])) );
+           if (temp < min_dis) {
+              min_dis = temp;
            }
        }
-       if (get_crash(s, trees, num_trees) == 1) {
-          crash_penalty = 200;
-       }
-       cost += ground_penalty + tilt_penalty + crash_penalty + 10*exp(-min); 
+       float tree_cost = 300*exp(-min_dis/12.0);
+       cost += tree_cost;
        //Computes the control cost
        float control_cost = 0;
        for (i = 0; i < CONTROL_DIM; i++) {
@@ -523,12 +592,16 @@ class M_Pi_2:
           state_cost += (s[i] - p[i])*A[i]*(s[i] - p[i]);
        }
        cost += state_cost;
+       if (threadIdx.x == 0 && blockIdx.x == 0 && t == 50) {
+          //printf("Min Distance: %%f   Tree Costs: %%f", min_dis/12, tree_cost);
+          printf("|| Relative Costs: state:%%f   control:%%f   tree:%%f   tilt:%%f   ground:%%f %%f||", state_cost, control_cost, tree_cost, tilt_penalty, ground_penalty, s[2]); 
+       }
        return cost;
     }
 
     __device__ float get_terminal_cost(float* s, float* p)
     {
-       float cost = 0;
+       float cost = 0*(p[0] - s[0])*(p[0] - s[0]) + (p[1] - s[1])*(p[1] - s[1]);
        return cost;
     }
    
@@ -551,6 +624,7 @@ class M_Pi_2:
        __shared__ float R[CONTROL_DIM*CONTROL_DIM];
        __shared__ float A[STATE_DIM*STATE_DIM];
        __shared__ float p[STATE_DIM];
+       //float loc_trees[600];
        float s[STATE_DIM];
        float u[CONTROL_DIM];
        float w[CONTROL_DIM];
@@ -565,11 +639,14 @@ class M_Pi_2:
              p[tdx] = goal_state[tdx];
              R[tdx] = control_weights_d[tdx];
           }
-          if (tdx == 0) {
-             for (i = 0; i < STATE_DIM; i++) {
+          for (i = 0; i < STATE_DIM; i++) {
                 s[i] = init_state[i];
-             }
           }
+         /*for (i = 0; i < num_trees; i++) {
+             for (j = 0; j < 6; j++) {
+                loc_trees[6*i + j] = trees[6*i + j];
+             }
+          }*/
            __syncthreads();
           //Start the main program loop 
           for (i = 0; i < T; i++) {
@@ -636,7 +713,7 @@ class M_Pi_2:
                 w[3] = min_speed;
              }
              //Check to see if the machine has crashed into a tree
-             int crash = get_crash(s,trees, num_trees);
+             int crash = get_crash(s,trees, num_trees,i);
              //If the machine has not crashed update the state equations
              if (crash == 0) {
                 s[0] += dt*s[6];
@@ -672,7 +749,7 @@ class M_Pi_2:
                 s[15] += dt*motor_gain*(w[3] - s[15]);
              }
              //Get State Costs
-             float cost = get_state_cost(s, u, p, trees, A, R, num_trees);
+             float cost = get_state_cost(s, u, p, trees, A, R, num_trees, i);
              //Record the state costs
              state_costs_d[(blockDim.x*bdx + tdx)*T + i] = cost;
              //Record the control costs
@@ -701,7 +778,7 @@ class M_Pi_2:
     #include <stdio.h>
     #define T %d
 
-    __global__ void cost_to_go(float* states, float* terminals) 
+    __global__ void cost_to_go(float* states, float* terminals, float* a) 
     {
       int tdx = threadIdx.x;
       int bdx = blockIdx.x;
@@ -718,7 +795,8 @@ class M_Pi_2:
         }
       }
       __syncthreads();
-      float lambda = -1.0/1000.0;
+      float lambda = -1.0/a[0];
+      //printf("%%f, %%f ||", a[0], lambda);
       states[bdx*T+tdx] = exp(lambda*s_costs[tdx]);
     }
 
@@ -798,12 +876,14 @@ class M_Pi_2:
 if __name__ == "__main__":
     state= np.zeros(16, dtype=np.float32)
     T = 150
-    K = 1000
+    K = 1028
     time_horizon = 3
     forest = []
-    for i in range(1,20):
-        for j in range(1,20):
-            r = np.random.randn(4)
-            forest.extend([3*i + r[0], 3*j + r[1], 10, .1, 3*np.cos(r[2]*3.14), 3*np.sin(r[3]*3.14)])
+    vel = 1.0
+    for i in range(1,33):
+        for j in range(1,33):
+            r = np.random.randn(3)
+            forest.extend([3*i + r[0], 3*j + r[1], 10, .1, vel*np.cos(6.28*r[2]), vel*np.sin(6.28*r[2])])
     A = M_Pi_2(state, forest, K, time_horizon, T)
     A.multi_pi()
+    print len(forest)
