@@ -41,7 +41,7 @@ Iy = Ix
 Iz = .4*M*R**2 + 4*l**2*m
 K_m = 1.5e-9
 K_f = 6.11e-8
-motor_gain = .05
+motor_gain = 20
 max_rotor_speed = 9000.0
 min_rotor_speed = 1000.0
 max_thrust = 5832.23
@@ -63,7 +63,7 @@ class M_Pi_2:
     Initializes the PI^2 class, compiles all the CUDA code and stores them
     as callable functions
     """
-    def __init__(self, init_state, forest, K, time, T, mech_params = [1.5e-9, 6.11e-8, 1.0]):
+    def __init__(self, init_state, forest, K, time, T, mech_params = [1.5e-9, 6.11e-8, 20]):
         #Store the initial stae values on both the CPU and GPU
         self.state = init_state
         self.state_d = self.on_gpu(state)
@@ -93,8 +93,9 @@ class M_Pi_2:
         multiply = self.func4()
         self.funcs = rollout_kernel, cost_to_go, reduction, multiply, U_d
 
-    def rollouts(self, U, var1, var2, goal_state_d, A_d, R_d):
+    def rollouts(self, U, var, goal_state_d, A_d, R_d):
         forest = []
+        var_d = self.on_gpu(var)
         for i in range(len(self.forest)//6):
             if np.sqrt((self.state[0] - self.forest[6*i])**2 + (self.state[1] - self.forest[6*i+1])**2) < 12:
                 forest.extend(self.forest[6*i:6*(i+1)])
@@ -115,7 +116,7 @@ class M_Pi_2:
         #Launch the kernel for simulating rollouts
         rollout_kernel(self.controls_d, self.state_costs_d, self.terminal_costs_d,
                        du_d, self.state_d, self.forest_d, goal_state_d, A_d, R_d, 
-                       self.mech_params_d, np.float32(var1), np.float32(var2), np.int32(num_trees),
+                       self.mech_params_d, var_d, np.int32(num_trees),
                        grid=gridsize, block=blocksize)
         cuda.Context.synchronize()
         #print "State Costs"
@@ -201,8 +202,8 @@ class M_Pi_2:
         ani_info = []
         #Defines the control cost matrix and state weighting vector for PI^2
         A = np.zeros(16,dtype=np.float32)
-        A = np.array([2.5,2.5,5.0,1,1,1.5,1.25,1.25,1.25,.15,.15,.5, 0,0,0,0])
-        R = np.identity(4, dtype = np.float32)*(1/100000.0)
+        A = np.array([2.5,2.5,0,0,0,50,1,1,1,0,0,0,0,0])
+        R = np.identity(4, dtype = np.float32)*(5/10000000.0)
         A_d = self.on_gpu(A)
         R_d = self.on_gpu(R)
         #Prepares the quadrotor for takeoff, p is the point it's aiming at.
@@ -210,7 +211,7 @@ class M_Pi_2:
         p_d = self.on_gpu(p)
         U = np.zeros(T*4, dtype = np.float32)
         U = self.on_gpu(U)
-        var = 400
+        var = np.array([50,10,10,10], dtype = np.float32)
         #Takeoff!
         while(self.state[2] < 2):
             start = time.time()
@@ -227,15 +228,15 @@ class M_Pi_2:
             U_new[:(T-1)*4] = U_old[4:]
             U = self.on_gpu(U_new)
         print "Takeoff Succesfull, current state: "
-        print self.state
+        print self.state[11]
         print 
         #Now pursuit of the point begins
-        points = [np.array([105,20,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
-                  np.array([-5,40,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
-                  np.array([105,60,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
-                  np.array([-5,80,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
-                  np.array([105,100,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
-                  np.array([105,105,2,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32)]
+        points = [np.array([105,20,10,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([-5,40,10,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([105,60,10,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([-5,80,10,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([105,100,10,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([105,105,3,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32)]
         p_d = self.on_gpu(p)
         count = 0
         max_speed = 0
@@ -245,12 +246,14 @@ class M_Pi_2:
         speed = 500
         goal = []
         i = 0
-        p = points[i]
+        p = points[5]
         val = 0
-        while(i < 5):
-            print count
+        thrust = []
+        Test = []
+        while(count < 5000 and i < 5):
+            thrust.append(U.get()[0:1])
             print "Loc"
-            print self.state[0:12]
+            print self.state
             if np.isnan(val):
                 break
             if (self.state[2] < .1):
@@ -262,18 +265,20 @@ class M_Pi_2:
                 i += 1
                 if i == 5:
                     break
-                p = points[i]
+                p = points[5]
                 p_effec_d = self.point_normalizer(self.state,p,10,goal)
                 if count % 2 == 0:
                     goal.append([p[0],p[1]])
             else:
                 if (count % 2 == 0):
                     goal.append([p[0],p[1]])
-                p_effec_d = self.on_gpu(p)
-            U = self.rollouts(U, 400, 7.5, p_effec_d, A_d, R_d)
+                    p_effec_d = self.on_gpu(p)
+            print p_effec_d
+            U = self.rollouts(U, var, p_effec_d, A_d, R_d)
             U_old = U.get()
             info = self.simulator(U_old.reshape(T,4), self.state,1)
             self.state= info[0]
+            Test.append(info[0][4])
             if (info[-1]):
                 print "Hit"
                 break
@@ -292,6 +297,7 @@ class M_Pi_2:
             d = np.sqrt((np.sum(self.state[:3] - p[:3])**2))
             speed = np.sqrt(np.sum(self.state[6:9]*self.state[6:9]))
             print "-----------------------"
+        print np.mean(np.array(Test))
         print "Final Point Destination"
         print p
         print
@@ -300,8 +306,7 @@ class M_Pi_2:
         print 
         print "Maximum Speed"
         print max_speed
-        if count > 5000:
-            self.dump(ani_info,goal)
+        self.dump(ani_info,goal,A,R)
         self.plotter(X,Y,Z,d2_plot=True)
     
     def point_normalizer(self,quad_pos, point,r, goal):
@@ -318,7 +323,11 @@ class M_Pi_2:
         p_effec_d = self.on_gpu(p_effec)
         return p_effec_d
 
-    def dump(self, ani_info,goal):
+    def dump(self, ani_info,goal,A,R):
+        name = ''
+        for a in A:
+            name += str(a) + "_" 
+        name +="__" + str(np.max(R)) + ".npy"
         K = len(ani_info)
         states = np.zeros((K, 16))
         trees = np.zeros((K, len(ani_info[0][1]), 4))
@@ -326,7 +335,7 @@ class M_Pi_2:
             states[i,:] = ani_info[i][0]
             for j in range(len(self.forest)/6):
                 trees[i, j, :] = np.array(ani_info[i][1][j])
-        output = open('no_restraints2.npy', 'wb')
+        output = open(name, 'wb')
         np.savez(output, states,trees,np.array(goal))
 
     def plot_controls(self, U):
@@ -395,14 +404,15 @@ class M_Pi_2:
         vel = []
         hit = False
         for t in range(steps):
-            noise = 0*np.random.randn(6)
+            noise = np.random.randn(6)
             for i in range(len(self.forest)/6):
                 if np.sqrt((s[0] - self.forest[6*i + 0])**2 + (s[1] - self.forest[6*i + 1])**2) < self.forest[6*i + 3]+total_radius and self.forest[6*i + 2] > s[2]:     
                     hit = True
             w[0] = hover_speed + U[t,0] - U[t,2] + U[t,3];
             w[1] = hover_speed + U[t,0] + U[t,1] - U[t,3];
             w[2] = hover_speed + U[t,0] + U[t,2] + U[t,3];
-            w[3] = hover_speed + U[t,0] - U[t,1] + U[t,3];
+            w[3] = hover_speed + U[t,0] - U[t,1] - U[t,3];
+            print w
             if (w[0] > max_speed):
                 w[0] = max_speed
             elif (w[0] < min_speed):
@@ -431,7 +441,7 @@ class M_Pi_2:
             if (s[2] < 0):
                 s[2] = 0
             s[3] += dt*(np.cos(s[4])*s[9] + np.sin(s[4])*s[11] + .01*noise[3])
-            s[4] += dt*(np.sin(s[4])*np.tan(s[3])*s[9] + s[10] - np.cos(s[4])*np.tan(s[3])*s[11] + .01*noise[4])
+            s[4] += dt*(np.sin(s[4])**2/np.cos(s[3])*s[9] + s[10] - np.cos(s[4])*np.sin(s[4])/np.cos(s[3])*s[11] + .01*noise[4])
             s[5] += dt*(-np.sin(s[4])/np.cos(s[3])*s[9] + np.cos(s[4])/np.cos(s[3])*s[11] + .01*noise[5])
             F_1 = K_f * s[12]**2
             F_2 = K_f * s[13]**2
@@ -447,28 +457,28 @@ class M_Pi_2:
             M_2 = K_m*s[13]**2
             M_3 = K_m*s[14]**2
             M_4 = K_m*s[15]**2
+            print "Moment Sum"
+            print M_1 - M_2 + M_3 - M_4
             s[11] += dt/Iz * (M_1 - M_2 + M_3 - M_4 - s[9]*s[10]*(Iy - Ix))
-            s_actual_1 = (w[0] - s[12])/motor_gain + s[12]
-            s_actual_2 = (w[1] - s[13])/motor_gain + s[13]
-            s_actual_3 = (w[2] - s[14])/motor_gain + s[14]
-            s_actual_4 = (w[3] - s[15])/motor_gain + s[15]
-            s[12] += motor_gain*dt*(s_actual_1 - s[12])
-            s[13] += motor_gain*dt*(s_actual_2 - s[13])
-            s[14] += motor_gain*dt*(s_actual_3 - s[14])
-            s[15] += motor_gain*dt*(s_actual_4 - s[15])
+            print "Yaw accel"
+            print s[11]
+            s[12] += motor_gain*dt*(w[0] - s[12])
+            s[13] += motor_gain*dt*(w[1] - s[13])
+            s[14] += motor_gain*dt*(w[2] - s[14])
+            s[15] += motor_gain*dt*(w[3] - s[15])
             for i in range(len(self.forest)/6):
-                vel = 1.0
+                vel = 5.0
                 x,y = self.forest[6*i],self.forest[6*i + 1]
                 p,q = s[0],s[1]
-                a = (p-x)/np.sqrt( (x - s[0])**2 + (x - s[0])**2)
+                a = (p-x)/np.sqrt( (y - s[1])**2 + (x - s[0])**2)
                 b = (q-y)/np.sqrt( (y - s[1])**2 + (x - s[0])**2)
                 if ( np.sqrt((self.forest[6*i]-s[0])**2 + (self.forest[6*i + 1] - s[1])**2) < 12):    
-                    self.forest[6*i + 4] += .5*dt*(vel*a - self.forest[6*i + 4]) 
-                    self.forest[6*i + 5] += .5*dt*(vel*b - self.forest[6*i +5])
+                    self.forest[6*i + 4] += .25*dt*(vel*a - self.forest[6*i + 4]) 
+                    self.forest[6*i + 5] += .25*dt*(vel*b - self.forest[6*i +5])
                 if (i == 0):
                     print self.forest[0],self.forest[1]
-                self.forest[6*i] += 0*dt*np.random.randn(1) + self.forest[6*i + 4]*dt
-                self.forest[6*i + 1] += 0*dt*np.random.randn(1)+self.forest[6*i + 5]*dt
+                self.forest[6*i] += dt*np.random.randn(1) + self.forest[6*i + 4]*dt
+                self.forest[6*i + 1] += dt*np.random.randn(1)+self.forest[6*i + 5]*dt
                 if (self.forest[6*i] > 100 or self.forest[6*i] < 0):
                     self.forest[6*i + 4] *= -1
                 if (self.forest[6*i + 1] > 100 or self.forest[6*i + 1] < 0):
@@ -524,8 +534,9 @@ class M_Pi_2:
     
     __device__ __constant__ float U_d[T*CONTROL_DIM];
     
-    __device__ int get_crash(float* s, float* t, int num_trees, int step) 
+    __device__ int get_crash(float* s, float* t, int num_trees, int time) 
     {
+       float step = 0;
        int crash = 0;
        if (s[2] < .1 && s[8] < 0) {
           crash = 1;
@@ -555,9 +566,6 @@ class M_Pi_2:
        } 
        if (s[2] < .1 && s[8] < 0) {
           ground_penalty = 1000;
-       }
-       else if (s[2] < 1.2) {
-          ground_penalty = 100;
        }
        if (fabs(s[3]) > 2.00 || fabs(s[4]) > 2.00) {
           tilt_penalty = 0;
@@ -594,7 +602,7 @@ class M_Pi_2:
        cost += state_cost;
        if (threadIdx.x == 0 && blockIdx.x == 0 && t == 50) {
           //printf("Min Distance: %%f   Tree Costs: %%f", min_dis/12, tree_cost);
-          printf("|| Relative Costs: state:%%f   control:%%f   tree:%%f   tilt:%%f   ground:%%f %%f||", state_cost, control_cost, tree_cost, tilt_penalty, ground_penalty, s[2]); 
+          //printf("|| Relative Costs: state:%%f   control:%%f   tree:%%f   tilt:%%f   ground:%%f %%f||", state_cost, control_cost, tree_cost, tilt_penalty, ground_penalty, s[2]); 
        }
        return cost;
     }
@@ -615,7 +623,7 @@ class M_Pi_2:
     __global__ void rollout_kernel(float* controls_d, float* state_costs_d, float* terminal_costs_d,
                                    float* du, float* init_state, float* trees, float* goal_state, 
                                    float* state_weights_d, float* control_weights_d, float* mech_params_d, 
-                                   float var1, float var2, int num_trees)
+                                   float* var_d, int num_trees)
     {
        //Get thread and block index
        int tdx = threadIdx.x;
@@ -624,7 +632,7 @@ class M_Pi_2:
        __shared__ float R[CONTROL_DIM*CONTROL_DIM];
        __shared__ float A[STATE_DIM*STATE_DIM];
        __shared__ float p[STATE_DIM];
-       //float loc_trees[600];
+       float loc_trees[600];
        float s[STATE_DIM];
        float u[CONTROL_DIM];
        float w[CONTROL_DIM];
@@ -642,28 +650,23 @@ class M_Pi_2:
           for (i = 0; i < STATE_DIM; i++) {
                 s[i] = init_state[i];
           }
-         /*for (i = 0; i < num_trees; i++) {
+         for (i = 0; i < num_trees; i++) {
              for (j = 0; j < 6; j++) {
                 loc_trees[6*i + j] = trees[6*i + j];
              }
-          }*/
+          }
            __syncthreads();
           //Start the main program loop 
           for (i = 0; i < T; i++) {
              //Add exploration noise to the control commands
              for (j = 0; j < CONTROL_DIM; j++) {
-                if (j %% 4 == 0) {
-                   u[j] = U_d[i*CONTROL_DIM + j] + du[(blockDim.x*bdx + tdx)*T*CONTROL_DIM + i*CONTROL_DIM + j]*var1;
-                }
-                else {
-                    u[j] = U_d[i*CONTROL_DIM + j] + du[(blockDim.x*bdx + tdx)*T*CONTROL_DIM + i*CONTROL_DIM + j]*var2;
-                }
+                 u[j] = U_d[i*CONTROL_DIM + j] + du[(blockDim.x*bdx + tdx)*T*CONTROL_DIM + i*CONTROL_DIM + j]*var_d[j];
              }
              //Perform checks to see if any of the control commands violate the machines ability
              if (u[0] > max_thrust) {
                 u[0] = max_thrust;
              }
-             else if (w[0] < min_thrust) {
+             else if (u[0] < min_thrust) {
                 u[0] = min_thrust;
              }
              if (u[1] > max_tilt) {
@@ -672,22 +675,22 @@ class M_Pi_2:
              else if (u[1] < min_tilt) {
                 u[1] = min_tilt;
              }
-             if (w[2] > max_tilt) {
-                w[2] = max_tilt;
+             if (u[2] > max_tilt) {
+                u[2] = max_tilt;
              }
-             else if (w[2] < min_tilt) {
-                w[2] = min_tilt;
+             else if (u[2] < min_tilt) {
+                u[2] = min_tilt;
              }
-             if (w[3] > max_tilt) {
-                w[3] = max_tilt;
+             if (u[3] > max_tilt) {
+                u[3] = max_tilt;
              }
-             else if (w[3] < min_tilt) {
-                w[3] = min_tilt;
+             else if (u[3] < min_tilt) {
+                u[3] = min_tilt;
              }
              w[0] = hover_speed + u[0] - u[2] + u[3];
              w[1] = hover_speed + u[0] + u[1] - u[3];
              w[2] = hover_speed + u[0] + u[2] + u[3];
-             w[3] = hover_speed + u[0] - u[1] + u[3];
+             w[3] = hover_speed + u[0] - u[1] - u[3];            
              if (w[0] > max_speed) {
                 w[0] = max_speed;
              }
@@ -715,7 +718,7 @@ class M_Pi_2:
              //Check to see if the machine has crashed into a tree
              int crash = get_crash(s,trees, num_trees,i);
              //If the machine has not crashed update the state equations
-             if (crash == 0) {
+             if (crash == 0 || crash == 1) {
                 s[0] += dt*s[6];
                 s[1] += dt*s[7];
                 s[2] += dt*s[8];
@@ -726,7 +729,7 @@ class M_Pi_2:
                 //   s[2] = CEILING_H;
                 //}
                 s[3] += dt*(cos(s[4])*s[9] + sin(s[4])*s[11]);
-                s[4] += dt*(sin(s[4])*tan(s[3])*s[9] + s[10] - cos(s[4])*tan(s[3])*s[11]);
+                s[4] += dt*(sin(s[4])*sin(s[4])/cos(s[3])*s[9] + s[10] - cos(s[4])*sin(s[4])/cos(s[3])*s[11]);
                 s[5] += dt*(-sin(s[4])/cos(s[3])*s[9] + cos(s[4])/cos(s[3])*s[11]);
                 float F_1 = kf * s[12]*s[12];
                 float F_2 = kf * s[13]*s[13];
@@ -747,9 +750,21 @@ class M_Pi_2:
                 s[13] += dt*motor_gain*(w[1] - s[13]);
                 s[14] += dt*motor_gain*(w[2] - s[14]);
                 s[15] += dt*motor_gain*(w[3] - s[15]);
+                int k;
+                for (k = 0; k < num_trees; k++) {
+                   float vel = 1.0;
+                   loc_trees[6*k] += dt*loc_trees[6*k + 4];
+                   loc_trees[6*k+1] += dt*loc_trees[6*k + 5];
+                   //float x = loc_trees[6*k];
+                   //float y = loc_trees[6*k + 1];
+                   //float a = (s[0] - x)/sqrt( (x - s[0])*(x - s[0]) + (y - s[1])*(y - s[1]) );
+                   //float b = (s[1] - x)/sqrt( (x - s[0])*(x - s[0]) + (y - s[1])*(y - s[1]) );
+                   //loc_trees[6*k + 4] += .25*dt*(vel*a - loc_trees[6*k + 4]);
+                   //loc_trees[6*k + 5] += .25*dt*(vel*b - loc_trees[6*k + 5]);
+                }
              }
              //Get State Costs
-             float cost = get_state_cost(s, u, p, trees, A, R, num_trees, i);
+             float cost = get_state_cost(s, u, p, loc_trees, A, R, num_trees, i);
              //Record the state costs
              state_costs_d[(blockDim.x*bdx + tdx)*T + i] = cost;
              //Record the control costs
@@ -875,15 +890,15 @@ class M_Pi_2:
 
 if __name__ == "__main__":
     state= np.zeros(16, dtype=np.float32)
-    T = 150
+    T = 100
     K = 1028
-    time_horizon = 3
+    time_horizon = 2
     forest = []
-    vel = 1.0
-    for i in range(1,33):
-        for j in range(1,33):
+    vel = 5.0
+    for i in range(1,20):
+        for j in range(1,20):
             r = np.random.randn(3)
-            forest.extend([3*i + r[0], 3*j + r[1], 10, .1, vel*np.cos(6.28*r[2]), vel*np.sin(6.28*r[2])])
+            forest.extend([5*i + r[0], 5*j + r[1], 10, .1, vel*np.cos(6.28*r[2]), vel*np.sin(6.28*r[2])])
     A = M_Pi_2(state, forest, K, time_horizon, T)
     A.multi_pi()
     print len(forest)
