@@ -93,7 +93,7 @@ class M_Pi_2:
         multiply = self.func4()
         self.funcs = rollout_kernel, cost_to_go, reduction, multiply, U_d
 
-    def rollouts(self, U, var, goal_state_d, A_d, R_d):
+    def rollouts(self, U, var, goal_state_d, A_d, R_d, count):
         forest = []
         var_d = self.on_gpu(var)
         for i in range(len(self.forest)//6):
@@ -119,10 +119,6 @@ class M_Pi_2:
                        self.mech_params_d, var_d, np.int32(num_trees),
                        grid=gridsize, block=blocksize)
         cuda.Context.synchronize()
-        #print "State Costs"
-        #d = self.state_costs_d.get()
-        #print d[0:150]
-        #print np.mean(d)
         a = 10000
         a = gpuarray.to_gpu(np.array(a,dtype=np.float32))
         #Launch the kernel for computing cost-to-go values for each state
@@ -130,6 +126,22 @@ class M_Pi_2:
         gridsize = (self.K,1,1)
         cost_to_go(self.state_costs_d, self.terminal_costs_d, a, block=blocksize, grid=gridsize)
         cuda.Context.synchronize()
+        """
+        Records spray data to be dumped for plotting
+        """
+        path_plot_info = []
+        color_info = []
+        if (count % 50 == 0 and count is not 0):
+            A = self.state_costs_d.get()
+            A = A.reshape((K,T))
+            A = A[:,0]
+            controls = self.controls_d.get()
+            for ind in range(100):
+                path_plot_info.append(controls[4*T*ind:4*T*(ind+1)])
+                color_info.append(A[ind])
+        """
+        Done recording spray data
+        """
         #Compute the normalizer, the normalizer is an array with T indices which
         #contains the sums of columns of state_costs_d        
         T_int = int(self.T)
@@ -176,7 +188,7 @@ class M_Pi_2:
             reduction(in_d, out_d, np.int32(_k), np.int32(control_dimensions*T_int), 
                      grid=gridsize, block=blocksize)
             cuda.Context.synchronize()
-        return out_d
+        return out_d,path_plot_info, color_info
     
     """
     Answers the a function call
@@ -189,115 +201,175 @@ class M_Pi_2:
         U = self.on_gpu(U)
         #Defines the initial state of the quadrotors
         init_pos = np.zeros(16)
-        init_pos[0] = 0
-        init_pos[1] = 0
-        init_pos[2] = 3
+        init_pos[0] = -12
+        init_pos[1] = -12
+        init_pos[2] = 0
         init_pos[12:] = 3167.77
         self.state= init_pos
         self.state_d = self.on_gpu(init_pos)
-        #X,Y, and Z hold location data for plotting
+        #X,Y, and Z hold location data for plotting quadrotor coordinates,
+        #and ani_info and spray_info record auxiliary plotting info (tree locations)
+        #and possible trajectory information etc.
         X = []
         Y = []
         Z = []
         ani_info = []
-        #Defines the control cost matrix and state weighting vector for PI^2
-        A = np.zeros(16,dtype=np.float32)
-        A = np.array([2.5,2.5,0,0,0,50,1,1,1,0,0,0,0,0])
+        #Define an algorithm to keep track of time steps
+        """*************************************************************************************
+        Beginning of the takeoff algorithm
+        ****************************************************************************************"""
+        #Defines the control cost matrix and state weighting vector for PI^2 during takeoff
+        A = np.array([2.5,2.5,2.5,0,0,0,50,50,50,0,0,0,0,0,0,0],dtype=np.float32)
         R = np.identity(4, dtype = np.float32)*(5/10000000.0)
         A_d = self.on_gpu(A)
         R_d = self.on_gpu(R)
         #Prepares the quadrotor for takeoff, p is the point it's aiming at.
-        p = np.array([0,0,2,0,0,0,0,0,0,0,0,0,0,0,0,0],dtype=np.float32)
+        p = np.array([-12,-12,3,0,0,0,0,0,0,0,0,0,0,0,0,0],dtype=np.float32)
         p_d = self.on_gpu(p)
+        #Initializes the control vector to 0
         U = np.zeros(T*4, dtype = np.float32)
         U = self.on_gpu(U)
-        var = np.array([50,10,10,10], dtype = np.float32)
+        var = np.array([50,1,1,1], dtype = np.float32)
         #Takeoff!
-        while(self.state[2] < 2):
-            start = time.time()
-            U = self.rollouts(U, var, 1.5, p_d, A_d, R_d)
+        while(np.sqrt(np.sum((self.state - p)**2)) > .25):
+            print "Taking Off: " + str(time)
+            #Compute and update the control vector U, rollouts returns a new control vector U,
+            #paths and color. Only the control vector is kept track of at this point.
+            U,paths,color = self.rollouts(U, var, 1.5, p_d, A_d, R_d, 1)
             U_old = U.get()
-            print time.time() - start
-            info = self.simulator(U_old.reshape(T,4), self.state, 1)
-            self.state= info[0]
-            self.state_d = self.on_gpu(info[0])
-            X.extend(info[1])
-            Y.extend(info[2])
-            Z.extend(info[3])
             U_new = np.zeros(T*4, dtype = np.float32)
             U_new[:(T-1)*4] = U_old[4:]
             U = self.on_gpu(U_new)
+            #Simulate the world one timestep ahead
+            info = self.simulator(U_old.reshape(T,4), self.state, 1, self.forest)
+            #Update the state
+            self.state= info[0]
+            self.state_d = self.on_gpu(info[0])
+            #Record some information for animation
+            X.extend(info[1])
+            Y.extend(info[2])
+            Z.extend(info[3])
+            ani_info.append([np.copy(info[0]),copy.deepcopy(info[4])])
         print "Takeoff Succesfull, current state: "
         print self.state[11]
-        print 
-        #Now pursuit of the point begins
-        points = [np.array([105,20,10,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
-                  np.array([-5,40,10,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
-                  np.array([105,60,10,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
-                  np.array([-5,80,10,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
-                  np.array([105,100,10,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
-                  np.array([105,105,3,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32)]
-        p_d = self.on_gpu(p)
-        count = 0
-        max_speed = 0
-        direc = 1
-        cycle = 0
-        d = 1000
-        speed = 500
-        goal = []
-        i = 0
-        p = points[5]
-        val = 0
-        thrust = []
-        Test = []
-        while(count < 5000 and i < 5):
-            thrust.append(U.get()[0:1])
-            print "Loc"
-            print self.state
+        """****************************************************************************
+        End of the takeoff algorithm.
+        
+        Begin of journey. The quadrotor must travel to the point (105, 105, 3) and back to 
+        (-12,-12,3)
+        ***************************************************************************"""
+        points = [np.array([105,105,3,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32),
+                  np.array([-12,-12,3,0,0,0,0,0,0,0,0,0,0,0,0,0], dtype=np.float32)]
+        #Path info and spray info are need to keep track of possible trajectories which are plotted later.
+        path_info = []
+        spray_info = []
+        #Defines the control cost matrix and state weighting vector for PI^2 while journeying
+        A = np.array([2.5,2.5,2.5,0,0,50,1,1,1,0,0,0,0,0,0,0],dtype=np.float32)
+        R = np.identity(4, dtype = np.float32)*(5/10000000.0)
+        A_d = self.on_gpu(A)
+        R_d = self.on_gpu(R)
+        #Define the exploration variance while journeying
+        var = np.array([50,10,10,10], dtype = np.float32)
+        #Start journeying to the point!
+        p = points[0]
+        returning = False
+        finished = False
+        while(not finished):
+            #Define the target point, this is either the point it's journeying to or
+            #a projection of that point onto a local radius.
+            val = np.sqrt((self.state[0] - p[0])**2 + (self.state[1] - p[1])**2)
+            if (val > 10):
+                p_effec_d = self.point_normalizer(self.state,p,10,goal)
+            elif (val < 1):
+                if (not returning):
+                    p = points[1]
+                    returning = True
+                else:
+                    finished = True
+            else:
+                p_effec_d = self.on_gpu(p)
+            #Perform a trial to update the control vector U
+            U,paths,colors = self.rollouts(U, var, p_effec_d, A_d, R_d,count)
+            U_old = U.get()
+            U_new = np.zeros(T*4, dtype = np.float32)
+            U_new[:(T-1)*4] = U_old[4:]
+            U = self.on_gpu(U_new)
+            """******************************************************************
+            Record possible paths "Sprays"
+            ******************************************************************"""
+            sprays = []
+            if (count % 50 == 0 and count is not 0):
+                fig = plt.gcf()
+                ax = plt.gca()
+                minim = min(colors)
+                maxum = max(colors)
+                colors = (colors - minim)/(maxum - minim)
+                print colors
+                for n in range(len(colors)):
+                    if (colors[n] > .05):
+                        print "PRINTING N"
+                        print n
+                        print
+                        print paths[n]
+                        roll = paths[n].reshape((T,4))
+                        plot_path1 = []
+                        plot_path2 = []
+                        sim_state = np.copy(self.state)
+                        forest = copy.deepcopy(self.forest)
+                        for m in range(T):
+                            r = roll[m,:]
+                            sim_info = self.simulator(roll, sim_state, 1, forest)
+                            sim_state = sim_info[0]
+                            plot_path1.append(sim_state[0])
+                            plot_path2.append(sim_state[1])
+                        sprays.append([plot_path1, plot_path2])
+                print "Recording Actual Path"
+                plot_path1 = []
+                plot_path2 = []
+                sim_state = np.copy(self.state)
+                forest = copy.deepcopy(self.forest)
+                for m in range(T):
+                    r = U_old.reshape((T,4))[m,:]
+                    sim_info = self.simulator(roll, sim_state, 1, forest)
+                    sim_state = sim_info[0]
+                    plot_path1.append(sim_state[0])
+                    plot_path2.append(sim_state[1])
+                sprays.append([plot_path1,plot_path2])
+                spray_info.append(sprays)
+            """********************************************************************
+            Done recording sprays
+            *********************************************************************"""
+            #Update state information after performing a simulation of 1 time-step
+            info = self.simulator(U_old.reshape(T,4), self.state,1, self.forest)
+            self.state= info[0]
+            self.state_d = self.on_gpu(info[0])
+            #Record the data
+            X.extend(info[1])
+            Y.extend(info[2])
+            Z.extend(info[3])
+            ani_info.append([np.copy(info[0]),copy.deepcopy(info[4])])                  
+            #Print info and increment count
+            print "Traveling: " +  str(count) + ", Location: " + str(self.state)
+            count += 1
+            #Define breaking conditions
             if np.isnan(val):
+                "Breaking because of numerical errors"
                 break
             if (self.state[2] < .1):
+                "Breaking because of imminent ground crash"
                 break
-            val = (self.state[0] - p[0])**2 + (self.state[1] - p[1])**2
-            if (val > 100):
-                p_effec_d = self.point_normalizer(self.state,p,10,goal)
-            elif (val < 50 and i < 5):
-                i += 1
-                if i == 5:
-                    break
-                p = points[5]
-                p_effec_d = self.point_normalizer(self.state,p,10,goal)
-                if count % 2 == 0:
-                    goal.append([p[0],p[1]])
-            else:
-                if (count % 2 == 0):
-                    goal.append([p[0],p[1]])
-                    p_effec_d = self.on_gpu(p)
-            print p_effec_d
-            U = self.rollouts(U, var, p_effec_d, A_d, R_d)
-            U_old = U.get()
-            info = self.simulator(U_old.reshape(T,4), self.state,1)
-            self.state= info[0]
-            Test.append(info[0][4])
+            if (info[-1]):
+                print "Breaking because of collision with obstacle"
+                break
             if (info[-1]):
                 print "Hit"
                 break
-            self.state_d = self.on_gpu(info[0])
-            if (np.sqrt(info[0][6]**2 + info[0][7]**2 + info[0][8]**2) > max_speed):
-                max_speed = np.sqrt(info[0][6]**2 + info[0][7]**2 + info[0][8]**2)
-            X.extend(info[1])
-            Y.extend(info[2])
-            Z.extend(info[3])
-            if count % 2 == 0:
-                ani_info.append([np.copy(info[0]),copy.deepcopy(info[4])])                  
-            U_new = np.zeros(T*4, dtype = np.float32)
-            U_new[:(T-1)*4] = U_old[4:]
-            U = self.on_gpu(U_new)
-            count += 1
-            d = np.sqrt((np.sum(self.state[:3] - p[:3])**2))
-            speed = np.sqrt(np.sum(self.state[6:9]*self.state[6:9]))
-            print "-----------------------"
-        print np.mean(np.array(Test))
+            #END OF LOOP
+        """**********************************************************************
+        END of Journeying algorithm
+
+        Beginning of landing algorithm
+        ********************************************************************"""
         print "Final Point Destination"
         print p
         print
@@ -306,7 +378,7 @@ class M_Pi_2:
         print 
         print "Maximum Speed"
         print max_speed
-        self.dump(ani_info,goal,A,R)
+        self.dump(ani_info,goal, spray_info, A,R)
         self.plotter(X,Y,Z,d2_plot=True)
     
     def point_normalizer(self,quad_pos, point,r, goal):
@@ -323,7 +395,7 @@ class M_Pi_2:
         p_effec_d = self.on_gpu(p_effec)
         return p_effec_d
 
-    def dump(self, ani_info,goal,A,R):
+    def dump(self, ani_info,goal, spray_info, A,R):
         name = ''
         for a in A:
             name += str(a) + "_" 
@@ -336,7 +408,8 @@ class M_Pi_2:
             for j in range(len(self.forest)/6):
                 trees[i, j, :] = np.array(ani_info[i][1][j])
         output = open(name, 'wb')
-        np.savez(output, states,trees,np.array(goal))
+        sprays = np.array(spray_info)
+        np.savez(output, states,trees,np.array(goal),sprays)
 
     def plot_controls(self, U):
         length = len(U)/8
@@ -389,7 +462,7 @@ class M_Pi_2:
         plt.show()
  
         
-    def simulator(self, U, state, steps):
+    def simulator(self, U, state, steps, forest):
         dt = self.dt
         T = self.T
         X = []
@@ -405,8 +478,8 @@ class M_Pi_2:
         hit = False
         for t in range(steps):
             noise = np.random.randn(6)
-            for i in range(len(self.forest)/6):
-                if np.sqrt((s[0] - self.forest[6*i + 0])**2 + (s[1] - self.forest[6*i + 1])**2) < self.forest[6*i + 3]+total_radius and self.forest[6*i + 2] > s[2]:     
+            for i in range(len(forest)/6):
+                if np.sqrt((s[0] - forest[6*i + 0])**2 + (s[1] - forest[6*i + 1])**2) < forest[6*i + 3]+total_radius and forest[6*i + 2] > s[2]:     
                     hit = True
             w[0] = hover_speed + U[t,0] - U[t,2] + U[t,3];
             w[1] = hover_speed + U[t,0] + U[t,1] - U[t,3];
@@ -457,34 +530,34 @@ class M_Pi_2:
             M_2 = K_m*s[13]**2
             M_3 = K_m*s[14]**2
             M_4 = K_m*s[15]**2
-            print "Moment Sum"
-            print M_1 - M_2 + M_3 - M_4
+            #print "Moment Sum"
+            #print M_1 - M_2 + M_3 - M_4
             s[11] += dt/Iz * (M_1 - M_2 + M_3 - M_4 - s[9]*s[10]*(Iy - Ix))
-            print "Yaw accel"
-            print s[11]
+            #print "Yaw accel"
+            #print s[11]
             s[12] += motor_gain*dt*(w[0] - s[12])
             s[13] += motor_gain*dt*(w[1] - s[13])
             s[14] += motor_gain*dt*(w[2] - s[14])
             s[15] += motor_gain*dt*(w[3] - s[15])
-            for i in range(len(self.forest)/6):
-                vel = 5.0
-                x,y = self.forest[6*i],self.forest[6*i + 1]
+            for i in range(len(forest)/6):
+                vel = 1.4
+                x,y = forest[6*i],forest[6*i + 1]
                 p,q = s[0],s[1]
                 a = (p-x)/np.sqrt( (y - s[1])**2 + (x - s[0])**2)
                 b = (q-y)/np.sqrt( (y - s[1])**2 + (x - s[0])**2)
-                if ( np.sqrt((self.forest[6*i]-s[0])**2 + (self.forest[6*i + 1] - s[1])**2) < 12):    
-                    self.forest[6*i + 4] += .25*dt*(vel*a - self.forest[6*i + 4]) 
-                    self.forest[6*i + 5] += .25*dt*(vel*b - self.forest[6*i +5])
+                if ( np.sqrt((forest[6*i]-s[0])**2 + (forest[6*i + 1] - s[1])**2) < 12):    
+                    forest[6*i + 4] += .5*dt*(vel*a - forest[6*i + 4]) 
+                    forest[6*i + 5] += .5*dt*(vel*b - forest[6*i +5])
                 if (i == 0):
-                    print self.forest[0],self.forest[1]
-                self.forest[6*i] += dt*np.random.randn(1) + self.forest[6*i + 4]*dt
-                self.forest[6*i + 1] += dt*np.random.randn(1)+self.forest[6*i + 5]*dt
-                if (self.forest[6*i] > 100 or self.forest[6*i] < 0):
-                    self.forest[6*i + 4] *= -1
-                if (self.forest[6*i + 1] > 100 or self.forest[6*i + 1] < 0):
-                    self.forest[6*i + 5] *= -1
-                tree_info.append([self.forest[6*i],self.forest[6*i+1],self.forest[6*i+2],self.forest[6*i+3]])
-            self.forest_d = self.on_gpu(np.array(self.forest))
+                    print forest[0],forest[1]
+                forest[6*i] += dt*np.random.randn(1) + forest[6*i + 4]*dt
+                forest[6*i + 1] += dt*np.random.randn(1)+forest[6*i + 5]*dt
+                if (forest[6*i] > 100 or forest[6*i] < 0):
+                    forest[6*i + 4] *= -1
+                if (forest[6*i + 1] > 100 or forest[6*i + 1] < 0):
+                    forest[6*i + 5] *= -1
+                tree_info.append([forest[6*i],forest[6*i+1],forest[6*i+2],forest[6*i+3]])
+            forest_d = self.on_gpu(np.array(forest))
         return s, X, Y, Z, tree_info, hit
 
     def on_gpu(self,a):
@@ -534,16 +607,15 @@ class M_Pi_2:
     
     __device__ __constant__ float U_d[T*CONTROL_DIM];
     
-    __device__ int get_crash(float* s, float* t, int num_trees, int time) 
+    __device__ int get_crash(float* s, float* t, int num_trees) 
     {
-       float step = 0;
        int crash = 0;
        if (s[2] < .1 && s[8] < 0) {
           crash = 1;
        }
        int i;
        for (i = 0; i < num_trees; i++) {
-           if ( (sqrt( (s[0] - (t[6*i + 0] + dt*step*t[6*i + 4])) * (s[0] - (t[6*i + 0] + dt*step*t[6*i +4])) + (s[1] - (t[6*i + 1] + dt*step*t[6*i + 5]))*(s[1] - (t[6*i +1] + dt*step*t[6*i + 5])) ) < t[6*i + 3]+.25 + total_radius) && (s[2] < t[6*i + 2]) ) {
+           if ( (sqrt( (s[0] - t[6*i])*(s[0] - t[6*i]) + (s[1] - t[6*i + 1])*(s[1] - t[6*i +1]) ) < t[6*i + 3] + total_radius) && (s[2] < t[6*i + 2]) ) {
            crash = 1;
            }
        }
@@ -565,24 +637,24 @@ class M_Pi_2:
           speed_penalty = 0;
        } 
        if (s[2] < .1 && s[8] < 0) {
-          ground_penalty = 1000;
+          ground_penalty = 100;
        }
        if (fabs(s[3]) > 2.00 || fabs(s[4]) > 2.00) {
           tilt_penalty = 0;
        }
        int i,j;
-       if (get_crash(s, trees, num_trees, t) == 1) {
+       if (get_crash(s, trees, num_trees) == 1) {
           crash_penalty = 1000;
        }
        cost += ground_penalty + tilt_penalty + crash_penalty + speed_penalty;
        float min_dis = 1000; 
        for (i = 0; i < num_trees; i++) {
-           float temp = sqrt( (s[0] - (trees[6*i + 0] + dt*t*trees[6*i + 4])) * (s[0] - (trees[6*i + 0] + dt*t*trees[6*i + 4])) + (s[1] - (trees[6*i + 0] + dt*t*trees[6*i + 5])) * (s[1] - (trees[6*i + 0] + dt*t*trees[6*i + 5])) );
+           float temp = sqrt( (s[0] - trees[6*i])*(s[0] - trees[6*i]) + (s[1] - trees[6*i + 1])*(s[1] - trees[6*i + 1]) );
            if (temp < min_dis) {
               min_dis = temp;
            }
        }
-       float tree_cost = 300*exp(-min_dis/12.0);
+       float tree_cost = 350*exp(-min_dis/12.0);
        cost += tree_cost;
        //Computes the control cost
        float control_cost = 0;
@@ -600,9 +672,9 @@ class M_Pi_2:
           state_cost += (s[i] - p[i])*A[i]*(s[i] - p[i]);
        }
        cost += state_cost;
-       if (threadIdx.x == 0 && blockIdx.x == 0 && t == 50) {
+       if (threadIdx.x == 0 && blockIdx.x == 0 && t == 0) {
           //printf("Min Distance: %%f   Tree Costs: %%f", min_dis/12, tree_cost);
-          //printf("|| Relative Costs: state:%%f   control:%%f   tree:%%f   tilt:%%f   ground:%%f %%f||", state_cost, control_cost, tree_cost, tilt_penalty, ground_penalty, s[2]); 
+          //printf("|| Relative Costs: state:%%f   control:%%f   tree:%%f   tilt:%%f   ground:%%f   p[0]:%%f||", state_cost, control_cost, tree_cost, tilt_penalty, ground_penalty, p[11]); 
        }
        return cost;
     }
@@ -716,9 +788,9 @@ class M_Pi_2:
                 w[3] = min_speed;
              }
              //Check to see if the machine has crashed into a tree
-             int crash = get_crash(s,trees, num_trees,i);
+             int crash = get_crash(s,loc_trees, num_trees);
              //If the machine has not crashed update the state equations
-             if (crash == 0 || crash == 1) {
+             if (crash == 0) {
                 s[0] += dt*s[6];
                 s[1] += dt*s[7];
                 s[2] += dt*s[8];
@@ -751,16 +823,18 @@ class M_Pi_2:
                 s[14] += dt*motor_gain*(w[2] - s[14]);
                 s[15] += dt*motor_gain*(w[3] - s[15]);
                 int k;
+                float vel = 3;
                 for (k = 0; k < num_trees; k++) {
-                   float vel = 1.0;
                    loc_trees[6*k] += dt*loc_trees[6*k + 4];
                    loc_trees[6*k+1] += dt*loc_trees[6*k + 5];
-                   //float x = loc_trees[6*k];
-                   //float y = loc_trees[6*k + 1];
-                   //float a = (s[0] - x)/sqrt( (x - s[0])*(x - s[0]) + (y - s[1])*(y - s[1]) );
-                   //float b = (s[1] - x)/sqrt( (x - s[0])*(x - s[0]) + (y - s[1])*(y - s[1]) );
-                   //loc_trees[6*k + 4] += .25*dt*(vel*a - loc_trees[6*k + 4]);
-                   //loc_trees[6*k + 5] += .25*dt*(vel*b - loc_trees[6*k + 5]);
+                   /*
+                   float x = loc_trees[6*k];
+                   float y = loc_trees[6*k + 1];
+                   float a = (s[0] - x)/sqrt( (x - s[0])*(x - s[0]) + (y - s[1])*(y - s[1]) );
+                   float b = (s[1] - x)/sqrt( (x - s[0])*(x - s[0]) + (y - s[1])*(y - s[1]) );
+                   loc_trees[6*k + 4] += dt*(vel*a - loc_trees[6*k + 4]);
+                   loc_trees[6*k + 5] += dt*(vel*b - loc_trees[6*k + 5]);
+                   */
                 }
              }
              //Get State Costs
@@ -890,15 +964,15 @@ class M_Pi_2:
 
 if __name__ == "__main__":
     state= np.zeros(16, dtype=np.float32)
-    T = 100
+    T = 150
     K = 1028
-    time_horizon = 2
+    time_horizon = 3
     forest = []
-    vel = 5.0
-    for i in range(1,20):
-        for j in range(1,20):
+    vel = 1.4
+    for i in range(1,33):
+        for j in range(1,33):
             r = np.random.randn(3)
-            forest.extend([5*i + r[0], 5*j + r[1], 10, .1, vel*np.cos(6.28*r[2]), vel*np.sin(6.28*r[2])])
+            forest.extend([3*i + r[0], 3*j + r[1], 10, .1, vel*np.cos(6.28*r[2]), vel*np.sin(6.28*r[2])])
     A = M_Pi_2(state, forest, K, time_horizon, T)
     A.multi_pi()
     print len(forest)
