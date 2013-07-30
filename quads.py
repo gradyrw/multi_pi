@@ -189,6 +189,47 @@ class M_Pi_2:
                      grid=gridsize, block=blocksize)
             cuda.Context.synchronize()
         return out_d,path_plot_info, color_info
+
+
+    """
+    Takeoff algorithm
+    """
+    def takeoff(self, U, count, X, Y, Z, ani_info, goal, display_rollouts = False):
+        #Defines the control cost matrix and state weighting vector for PI^2 during takeoff
+        A = np.array([5.5,5.5,35,100,100,100,50,50,50,0,0,0,0,0,0,0],dtype=np.float32)
+        R = np.identity(4, dtype = np.float32)*(5/10000000.0)
+        A_d = self.on_gpu(A)
+        R_d = self.on_gpu(R)
+        #Prepares the quadrotor for takeoff, p is the point it's aiming at.
+        p = np.array([-12,-12,3,0,0,0,0,0,0,0,0,0,0,0,0,0],dtype=np.float32)
+        p_d = self.on_gpu(p)
+        var = np.array([100,1,1,1], dtype = np.float32)
+        #Takeoff!
+        while(abs(self.state[2] - p[2]) > .1 or abs(self.state[8]) > .05):
+            print "Taking Off: " + str(count) + ", Height: " + str(self.state[2])
+            #Compute and update the control vector U, rollouts returns a new control vector U,
+            #paths and color. Only the control vector is kept track of at this point.
+            U,paths,color = self.rollouts(U, var, p_d, A_d, R_d,1)
+            U_old = U.get()
+            U_new = np.zeros(T*4, dtype = np.float32)
+            U_new[:(T-1)*4] = U_old[4:]
+            U = self.on_gpu(U_new)
+            #Simulate the world one timestep ahead
+            info = self.simulator(U_old.reshape(T,4), self.state, 1, self.forest)
+            #Update the state
+            self.state= info[0]
+            self.state_d = self.on_gpu(info[0])
+            #Record some information for animation
+            X.extend(info[1])
+            Y.extend(info[2])
+            Z.extend(info[3])
+            ani_info.append([np.copy(info[0]),copy.deepcopy(info[4])])
+            #increment count
+            count += 1
+        print "Takeoff Succesfull, current state: "
+        print self.state[11]
+        return U, count
+        
     
     """
     Answers the a function call
@@ -217,45 +258,11 @@ class M_Pi_2:
         goal = []
         #Define a variable to keep track of time steps
         count = 0
-        """*************************************************************************************
-        Beginning of the takeoff algorithm
-        ****************************************************************************************"""
-        #Defines the control cost matrix and state weighting vector for PI^2 during takeoff
-        A = np.array([5.5,5.5,35,100,100,100,50,50,50,0,0,0,0,0,0,0],dtype=np.float32)
-        R = np.identity(4, dtype = np.float32)*(5/10000000.0)
-        A_d = self.on_gpu(A)
-        R_d = self.on_gpu(R)
-        #Prepares the quadrotor for takeoff, p is the point it's aiming at.
-        p = np.array([-12,-12,3,0,0,0,0,0,0,0,0,0,0,0,0,0],dtype=np.float32)
-        p_d = self.on_gpu(p)
         #Initializes the control vector to 0
         U = np.zeros(T*4, dtype = np.float32)
         U = self.on_gpu(U)
-        var = np.array([100,1,1,1], dtype = np.float32)
-        #Takeoff!
-        while(abs(self.state[2] - p[2]) > .1 or abs(self.state[8]) > .05):
-            print "Taking Off: " + str(count) + ", Height: " + str(self.state[2])
-            #Compute and update the control vector U, rollouts returns a new control vector U,
-            #paths and color. Only the control vector is kept track of at this point.
-            U,paths,color = self.rollouts(U, var, p_d, A_d, R_d,1)
-            U_old = U.get()
-            U_new = np.zeros(T*4, dtype = np.float32)
-            U_new[:(T-1)*4] = U_old[4:]
-            U = self.on_gpu(U_new)
-            #Simulate the world one timestep ahead
-            info = self.simulator(U_old.reshape(T,4), self.state, 1, self.forest)
-            #Update the state
-            self.state= info[0]
-            self.state_d = self.on_gpu(info[0])
-            #Record some information for animation
-            X.extend(info[1])
-            Y.extend(info[2])
-            Z.extend(info[3])
-            ani_info.append([np.copy(info[0]),copy.deepcopy(info[4])])
-            #increment count
-            count += 1
-        print "Takeoff Succesfull, current state: "
-        print self.state[11]
+        #Takeoff routine
+        U, count = self.takeoff(U, count, X, Y, Z, ani_info, goal)
         """****************************************************************************
         End of the takeoff algorithm.
         
@@ -273,7 +280,7 @@ class M_Pi_2:
         A_d = self.on_gpu(A)
         R_d = self.on_gpu(R)
         #Define the exploration variance while journeying
-        var = np.array([250,50,50,50], dtype = np.float32)
+        var = np.array([50,10,10,10], dtype = np.float32)
         #Start journeying to the point!
         p = points[0]
         max_speed = 0
@@ -998,11 +1005,11 @@ if __name__ == "__main__":
     K = 1028
     time_horizon = 3
     forest = []
-    vel = 1.4
-    for i in range(1,33):
-        for j in range(1,33):
+    vel = 0
+    for i in range(1,2):
+        for j in range(1,2):
             r = np.random.randn(3)
-            forest.extend([3*i + r[0], 3*j + r[1], 10, .1, vel*np.cos(6.28*r[2]), vel*np.sin(6.28*r[2])])
+            forest.extend([-300*i + r[0], 3*j + r[1], 10, .1, vel*np.cos(6.28*r[2]), vel*np.sin(6.28*r[2])])
     A = M_Pi_2(state, forest, K, time_horizon, T)
     A.multi_pi()
     print len(forest)
