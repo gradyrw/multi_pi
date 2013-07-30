@@ -93,14 +93,14 @@ class M_Pi_2:
         multiply = self.func4()
         self.funcs = rollout_kernel, cost_to_go, reduction, multiply, U_d
 
-    def rollouts(self, U, var, goal_state_d, A_d, R_d, count):
+    def rollouts(self, U, var, goal_state_d, A_d, R_d, count, landing = 0):
         forest = []
         var_d = self.on_gpu(var)
         for i in range(len(self.forest)//6):
             if np.sqrt((self.state[0] - self.forest[6*i])**2 + (self.state[1] - self.forest[6*i+1])**2) < 12:
                 forest.extend(self.forest[6*i:6*(i+1)])
         num_trees = len(forest)//6
-        print num_trees
+        #num_trees = 0
         if (num_trees is not 0):
             self.forest_d = self.on_gpu(np.array(forest,dtype=np.float32))
         #Get an array of random numbers from CUDA. The numbers are
@@ -116,7 +116,7 @@ class M_Pi_2:
         #Launch the kernel for simulating rollouts
         rollout_kernel(self.controls_d, self.state_costs_d, self.terminal_costs_d,
                        du_d, self.state_d, self.forest_d, goal_state_d, A_d, R_d, 
-                       self.mech_params_d, var_d, np.int32(num_trees),
+                       self.mech_params_d, var_d, np.int32(num_trees), np.int32(landing),
                        grid=gridsize, block=blocksize)
         cuda.Context.synchronize()
         a = 10000
@@ -131,7 +131,7 @@ class M_Pi_2:
         """
         path_plot_info = []
         color_info = []
-        if (count % 50 == 0 and count is not 0):
+        if (count == -1 and count is not 0):
             A = self.state_costs_d.get()
             A = A.reshape((K,T))
             A = A[:,0]
@@ -214,12 +214,14 @@ class M_Pi_2:
         Y = []
         Z = []
         ani_info = []
-        #Define an algorithm to keep track of time steps
+        goal = []
+        #Define a variable to keep track of time steps
+        count = 0
         """*************************************************************************************
         Beginning of the takeoff algorithm
         ****************************************************************************************"""
         #Defines the control cost matrix and state weighting vector for PI^2 during takeoff
-        A = np.array([2.5,2.5,2.5,0,0,0,50,50,50,0,0,0,0,0,0,0],dtype=np.float32)
+        A = np.array([5.5,5.5,35,100,100,100,50,50,50,0,0,0,0,0,0,0],dtype=np.float32)
         R = np.identity(4, dtype = np.float32)*(5/10000000.0)
         A_d = self.on_gpu(A)
         R_d = self.on_gpu(R)
@@ -229,13 +231,13 @@ class M_Pi_2:
         #Initializes the control vector to 0
         U = np.zeros(T*4, dtype = np.float32)
         U = self.on_gpu(U)
-        var = np.array([50,1,1,1], dtype = np.float32)
+        var = np.array([100,1,1,1], dtype = np.float32)
         #Takeoff!
-        while(np.sqrt(np.sum((self.state - p)**2)) > .25):
-            print "Taking Off: " + str(time)
+        while(abs(self.state[2] - p[2]) > .1 or abs(self.state[8]) > .05):
+            print "Taking Off: " + str(count) + ", Height: " + str(self.state[2])
             #Compute and update the control vector U, rollouts returns a new control vector U,
             #paths and color. Only the control vector is kept track of at this point.
-            U,paths,color = self.rollouts(U, var, 1.5, p_d, A_d, R_d, 1)
+            U,paths,color = self.rollouts(U, var, p_d, A_d, R_d,1)
             U_old = U.get()
             U_new = np.zeros(T*4, dtype = np.float32)
             U_new[:(T-1)*4] = U_old[4:]
@@ -250,6 +252,8 @@ class M_Pi_2:
             Y.extend(info[2])
             Z.extend(info[3])
             ani_info.append([np.copy(info[0]),copy.deepcopy(info[4])])
+            #increment count
+            count += 1
         print "Takeoff Succesfull, current state: "
         print self.state[11]
         """****************************************************************************
@@ -269,9 +273,10 @@ class M_Pi_2:
         A_d = self.on_gpu(A)
         R_d = self.on_gpu(R)
         #Define the exploration variance while journeying
-        var = np.array([50,10,10,10], dtype = np.float32)
+        var = np.array([250,50,50,50], dtype = np.float32)
         #Start journeying to the point!
         p = points[0]
+        max_speed = 0
         returning = False
         finished = False
         while(not finished):
@@ -280,7 +285,7 @@ class M_Pi_2:
             val = np.sqrt((self.state[0] - p[0])**2 + (self.state[1] - p[1])**2)
             if (val > 10):
                 p_effec_d = self.point_normalizer(self.state,p,10,goal)
-            elif (val < 1):
+            elif (val < 10):
                 if (not returning):
                     p = points[1]
                     returning = True
@@ -298,7 +303,7 @@ class M_Pi_2:
             Record possible paths "Sprays"
             ******************************************************************"""
             sprays = []
-            if (count % 50 == 0 and count is not 0):
+            if (count == -1 and count is not 0):
                 fig = plt.gcf()
                 ax = plt.gca()
                 minim = min(colors)
@@ -347,7 +352,9 @@ class M_Pi_2:
             X.extend(info[1])
             Y.extend(info[2])
             Z.extend(info[3])
-            ani_info.append([np.copy(info[0]),copy.deepcopy(info[4])])                  
+            ani_info.append([np.copy(info[0]),copy.deepcopy(info[4])])
+            if (np.sqrt(np.sum(self.state[6:9]**2))) > max_speed:
+                max_speed = np.sqrt(np.sum(self.state[6:9]**2)) 
             #Print info and increment count
             print "Traveling: " +  str(count) + ", Location: " + str(self.state)
             count += 1
@@ -361,15 +368,49 @@ class M_Pi_2:
             if (info[-1]):
                 print "Breaking because of collision with obstacle"
                 break
-            if (info[-1]):
-                print "Hit"
-                break
             #END OF LOOP
         """**********************************************************************
         END of Journeying algorithm
 
         Beginning of landing algorithm
         ********************************************************************"""
+        #Defines the landing point
+        p = np.array([-12,-12,.05,0,0,0,0,0,0,0,0,0,0,0,0,0],dtype=np.float32)
+        p_d = self.on_gpu(p)
+        #Defines the control cost matrix and state weighting vector for PI^2 while landing
+        A = np.array([10,10,10,100,100,25,5,5,150,0,0,0,0,0,0,0],dtype=np.float32)
+        R = np.identity(4, dtype = np.float32)*(1/100000000.0)
+        A_d = self.on_gpu(A)
+        R_d = self.on_gpu(R)
+        #Define the exploration variance while landing
+        var = np.array([450,2,2,2], dtype = np.float32)
+        count = 0
+        land = 1
+        while (self.state[2] > .03):
+            print "Landing: " + str(count) + ", Height: " + str(self.state[2])
+            #Compute and update the control vector U, rollouts returns a new control vector U,
+            #paths and color. Only the control vector is kept track of at this point.
+            U,paths,color = self.rollouts(U, var, p_d, A_d, R_d, 1, landing = land)
+            U_old = U.get()
+            U_new = np.zeros(T*4, dtype = np.float32)
+            U_new[:(T-1)*4] = U_old[4:]
+            U = self.on_gpu(U_new)
+            #Simulate the world one timestep ahead
+            info = self.simulator(U_old.reshape(T,4), self.state, 1, self.forest)
+            #Update the state
+            self.state= info[0]
+            self.state_d = self.on_gpu(info[0])
+            #Record some information for animation
+            X.extend(info[1])
+            Y.extend(info[2])
+            Z.extend(info[3])
+            ani_info.append([np.copy(info[0]),copy.deepcopy(info[4])])
+            #increment count
+            count += 1
+        print "Landing Succesfull, current state: "
+        print self.state
+        print
+        print "Program Finished"
         print "Final Point Destination"
         print p
         print
@@ -399,7 +440,7 @@ class M_Pi_2:
         name = ''
         for a in A:
             name += str(a) + "_" 
-        name +="__" + str(np.max(R)) + ".npy"
+        name =  "moving_trees.npy"
         K = len(ani_info)
         states = np.zeros((K, 16))
         trees = np.zeros((K, len(ani_info[0][1]), 4))
@@ -408,8 +449,8 @@ class M_Pi_2:
             for j in range(len(self.forest)/6):
                 trees[i, j, :] = np.array(ani_info[i][1][j])
         output = open(name, 'wb')
-        sprays = np.array(spray_info)
-        np.savez(output, states,trees,np.array(goal),sprays)
+        #sprays = np.array(spray_info)
+        np.savez(output, states,trees,np.array(goal))
 
     def plot_controls(self, U):
         length = len(U)/8
@@ -456,8 +497,8 @@ class M_Pi_2:
             for i in range(len(self.forest)/6):
                 circ = plt.Circle((self.forest[6*i],self.forest[6*i + 1]), self.forest[6*i + 3], color = 'r')
                 fig.gca().add_artist(circ)
-            ax.set_xlim(-10,110)
-            ax.set_ylim(-10,110)
+            ax.set_xlim(-20,110)
+            ax.set_ylim(-20,110)
             ax.plot(X,Y)
         plt.show()
  
@@ -485,7 +526,6 @@ class M_Pi_2:
             w[1] = hover_speed + U[t,0] + U[t,1] - U[t,3];
             w[2] = hover_speed + U[t,0] + U[t,2] + U[t,3];
             w[3] = hover_speed + U[t,0] - U[t,1] - U[t,3];
-            print w
             if (w[0] > max_speed):
                 w[0] = max_speed
             elif (w[0] < min_speed):
@@ -530,11 +570,7 @@ class M_Pi_2:
             M_2 = K_m*s[13]**2
             M_3 = K_m*s[14]**2
             M_4 = K_m*s[15]**2
-            #print "Moment Sum"
-            #print M_1 - M_2 + M_3 - M_4
             s[11] += dt/Iz * (M_1 - M_2 + M_3 - M_4 - s[9]*s[10]*(Iy - Ix))
-            #print "Yaw accel"
-            #print s[11]
             s[12] += motor_gain*dt*(w[0] - s[12])
             s[13] += motor_gain*dt*(w[1] - s[13])
             s[14] += motor_gain*dt*(w[2] - s[14])
@@ -546,10 +582,8 @@ class M_Pi_2:
                 a = (p-x)/np.sqrt( (y - s[1])**2 + (x - s[0])**2)
                 b = (q-y)/np.sqrt( (y - s[1])**2 + (x - s[0])**2)
                 if ( np.sqrt((forest[6*i]-s[0])**2 + (forest[6*i + 1] - s[1])**2) < 12):    
-                    forest[6*i + 4] += .5*dt*(vel*a - forest[6*i + 4]) 
-                    forest[6*i + 5] += .5*dt*(vel*b - forest[6*i +5])
-                if (i == 0):
-                    print forest[0],forest[1]
+                    forest[6*i + 4] += .25*dt*(vel*a - forest[6*i + 4]) 
+                    forest[6*i + 5] += .25*dt*(vel*b - forest[6*i +5])
                 forest[6*i] += dt*np.random.randn(1) + forest[6*i + 4]*dt
                 forest[6*i + 1] += dt*np.random.randn(1)+forest[6*i + 5]*dt
                 if (forest[6*i] > 100 or forest[6*i] < 0):
@@ -610,7 +644,7 @@ class M_Pi_2:
     __device__ int get_crash(float* s, float* t, int num_trees) 
     {
        int crash = 0;
-       if (s[2] < .1 && s[8] < 0) {
+       if (s[2] < .1 && s[8] < -.1) {
           crash = 1;
        }
        int i;
@@ -625,28 +659,24 @@ class M_Pi_2:
    /***********************************************************************************************
    Computes the immediate state cost of the system. 
    ************************************************************************************************/
-    __device__ float get_state_cost(float* s, float* u, float* p, float* trees, float* A, float* R, int num_trees, int t)
+    __device__ float get_state_cost(float* s, float* u, float* p, float* trees, float* A, float* R, int num_trees, int t, int landing)
     { 
        float cost = 0;
        //Computes the penalties for the state cost
        float ground_penalty = 0;
-       float tilt_penalty = 0;
        float crash_penalty = 0;
-       float speed_penalty = 0;
-       if (sqrt(s[0]*s[0] + s[1]*s[1]) > 8) {
-          speed_penalty = 0;
-       } 
-       if (s[2] < .1 && s[8] < 0) {
+       if (s[2] < .25 && s[8] < -.05) {
           ground_penalty = 100;
-       }
-       if (fabs(s[3]) > 2.00 || fabs(s[4]) > 2.00) {
-          tilt_penalty = 0;
        }
        int i,j;
        if (get_crash(s, trees, num_trees) == 1) {
           crash_penalty = 1000;
        }
-       cost += ground_penalty + tilt_penalty + crash_penalty + speed_penalty;
+       if (landing == 1) {
+          crash_penalty = 0;
+          ground_penalty = 0;
+       }
+       cost += ground_penalty + crash_penalty;
        float min_dis = 1000; 
        for (i = 0; i < num_trees; i++) {
            float temp = sqrt( (s[0] - trees[6*i])*(s[0] - trees[6*i]) + (s[1] - trees[6*i + 1])*(s[1] - trees[6*i + 1]) );
@@ -679,9 +709,9 @@ class M_Pi_2:
        return cost;
     }
 
-    __device__ float get_terminal_cost(float* s, float* p)
+    __device__ float get_terminal_cost(float* s, float* p, int landing)
     {
-       float cost = 0*(p[0] - s[0])*(p[0] - s[0]) + (p[1] - s[1])*(p[1] - s[1]);
+       float cost = 0*(p[0] - s[0])*(p[0] - s[0]) + (p[1] - s[1])*(p[1] - s[1]); 
        return cost;
     }
    
@@ -695,7 +725,7 @@ class M_Pi_2:
     __global__ void rollout_kernel(float* controls_d, float* state_costs_d, float* terminal_costs_d,
                                    float* du, float* init_state, float* trees, float* goal_state, 
                                    float* state_weights_d, float* control_weights_d, float* mech_params_d, 
-                                   float* var_d, int num_trees)
+                                   float* var_d, int num_trees, int landing)
     {
        //Get thread and block index
        int tdx = threadIdx.x;
@@ -838,7 +868,7 @@ class M_Pi_2:
                 }
              }
              //Get State Costs
-             float cost = get_state_cost(s, u, p, loc_trees, A, R, num_trees, i);
+             float cost = get_state_cost(s, u, p, loc_trees, A, R, num_trees, i, landing);
              //Record the state costs
              state_costs_d[(blockDim.x*bdx + tdx)*T + i] = cost;
              //Record the control costs
@@ -848,7 +878,7 @@ class M_Pi_2:
           }
           //Get and record the terminal costs
           if (blockDim.x*bdx + tdx < K) {
-              float terminal_cost = get_terminal_cost(s, p);
+              float terminal_cost = get_terminal_cost(s, p, landing);
               terminal_costs_d[blockDim.x*bdx + tdx] = terminal_cost;
           }
        }
