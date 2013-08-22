@@ -1106,9 +1106,5 @@ if __name__ == "__main__":
             r = np.random.randn(3)
             forest.extend([5*i + r[0], 5*j + r[1], 10, .1, vel*np.cos(6.28*r[2]), vel*np.sin(6.28*r[2])])
     A = M_Pi_2(state, forest, K, time_horizon, T)
-    #A.routine_1()
+    A.routine_1()
     #A.routine_2()
-    for i in range(1000):
-        A.simulator(np.zeros((150,4)), state, 150, forest)
-        if (i % 100000 == 0):
-            print i
