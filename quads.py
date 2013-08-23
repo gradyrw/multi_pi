@@ -125,11 +125,10 @@ class M_Pi_2:
         gridsize = (self.K,1,1)
         cost_to_go(self.state_costs_d, self.terminal_costs_d, a, block=blocksize, grid=gridsize)
         cuda.Context.synchronize()
-        """
-        Records spray data to be dumped for plotting
-        """
+        #Records spray data to be dumped for plotting
         path_plot_info = []
         color_info = []
+        """
         if (count % 500 == 0 and count is not 0):
             A = self.state_costs_d.get()
             A = A.reshape((K,T))
@@ -138,7 +137,6 @@ class M_Pi_2:
             for ind in range(100):
                 path_plot_info.append(controls[4*T*ind:4*T*(ind+1)])
                 color_info.append(A[ind])
-        """
         Done recording spray data
         """
         #Compute the normalizer, the normalizer is an array with T indices which
@@ -261,6 +259,7 @@ class M_Pi_2:
             """******************************************************************
             Record possible paths "Sprays"
             ******************************************************************"""
+            """
             sprays = []
             if (count % 500 == 0 and count is not 0):
                 for i in range(100):
@@ -303,6 +302,7 @@ class M_Pi_2:
                     plot_path2.append(sim_state[1])
                 path_info.append([plot_path1,plot_path2])
                 spray_info.append(sprays)
+            """
             """********************************************************************
             Done recording sprays
             *********************************************************************"""
@@ -1104,7 +1104,7 @@ if __name__ == "__main__":
     for i in range(1,2):
         for j in range(1,2):
             r = np.random.randn(3)
-            forest.extend([5*i + r[0], 5*j + r[1], 10, .1, vel*np.cos(6.28*r[2]), vel*np.sin(6.28*r[2])])
+            forest.extend([50*i + r[0], -5*j + r[1], 10, .1, vel*np.cos(6.28*r[2]), vel*np.sin(6.28*r[2])])
     A = M_Pi_2(state, forest, K, time_horizon, T)
     A.routine_1()
     #A.routine_2()
